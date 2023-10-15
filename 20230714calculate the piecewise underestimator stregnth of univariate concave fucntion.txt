@@ -1,0 +1,28 @@
+$ title calcuat the piecewise underestimator stregnth of unirarivate concave fucntion
+Scalar Alpha /0.8/;
+set n /1*20/;
+set iter /1*10/;
+Parameter Logr(*,*);
+Parameter Area_alpha;Area_alpha= 1/(Alpha+1);
+Parameter Area_ti(iter, n);
+Scalar Count /0/;
+loop(iter,
+  Count = Count + 1;
+  Area_ti(iter, n)$(ord(n)<=Count) = 1/2/Count*(((ord(n)-1)/Count)**Alpha + (ord(n)/Count)**Alpha );
+  Logr(iter, 'relaxation') = Area_alpha - sum(n$(ord(n)<=Count), Area_ti(iter, n));  
+  Logr(iter, 'Average_relaxation') = Logr(iter, 'relaxation')/Count;
+);
+
+
+display Area_alpha, Area_ti, Logr;
+*extract data to Excel workbook
+*embeddedCode Connect:
+*- GAMSReader:
+*    symbols:
+*      - name: Logr
+*- PandasExcelWriter:
+*    file: 0714PUS_alpha0.8.xlsx
+*    symbols:
+*      - name: Logr
+*        range: Logr!A1
+*endEmbeddedCode

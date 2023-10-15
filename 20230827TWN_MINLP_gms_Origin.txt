@@ -1,0 +1,984 @@
+$Title  TWN model
+$ontext
+总水网络优化设计模型：案例数据取自Grossmann，Smith等
+权衡主要包括新鲜水费用，废水处理费用，管线费用和环境性能
+TWN Problem采用P formulation(学者已证明是最佳的表达方式)， 忽略水处理单元水损失，忽略杂质变化对总水量的影响
+#暂未考虑双出口的水处理单元(例如反渗透膜法水处理), 后续可以添加
+
+----需要区分建模的几个关键建模选择和默认选项：
+    是否允许新鲜水送往水处理单元（默认不允许）
+    全局优化默认相对误差 1%
+    是否考虑自循环(默认不允许)，
+    是否允许单元间的直接和间接循环(允许)
+    是否区分再生回用和再生循环(默认不区分)
+    用水单元类型（固定流率，固定杂质负荷，或者都固定）
+    是否考虑将固定杂质负荷用水单元的水流率也固定（默认不固定）
+    是否考虑水管线的投资和操作费用（基于算例）
+    
+----模型是通用的，包括固定杂质负荷和固定流率的用水单元，以及水处理单元，
+----简化为WUN问题：水处理单元空集，环境阱不设浓度上界
+----简化为WTN问题：只考虑固定流率用水单元，并且设置进口水流率为0
+总水网络一共包括12类约束(不包括硬边界约束)
+算例1： Grossmann 2006 example 1, CCE, Global optimization for the synthesis of integrated water systems in chemical processes
+       Best Obj=117.05 t/h(固定用水量，不允许自循环);  Obj=101.57t/h(不固定用水量，不允许自循环)
+算例2： Grossmann 2006 example 2, CCE, 
+       Best Obj=$381,751.35;(固定用水量，不允许自循环); Obj= 381751.34(不固定用水量，不允许自循环)
+算例3： Grossmann 2006 example 3, CCE, 
+       Best Obj=$874,057.37 (固定用水量，不允许自循环); Obj= 874057.37(不固定用水量，不允许自循环)
+算例4： Grossmann 2006 example 4, CCE, 
+        Best Obj= $1033810.95 (固定用水量，不允许自循环);  Obj= 1031887.73(不固定用水量，不允许自循环)      
+
+算例5： Kim 2012 case 2, Chemical Engineering Journal, System analysis of total water systems for water minimization
+       ----优化时暂不考虑管线约束问题   Best obj =1199935.06$(不固定用水量，不允许自循环) 100.46s
+
+算例6： Kim 2012 case 1, Chemical Engineering Journal, System analysis of total water systems for water minimization
+       ----优化时暂不考虑管线约束问题（经典算例） 5个用水单元，3个杂质，3个水处理单元 Best obj = 1,361.84 k$(不固定用水量，不允许自循环)， Baron不收敛
+                                                                            文献结果为 Fan 1,371.37 Kim 1,418.98
+
+算例7： Alva-Argáez et al. 2007,Int. J. Environment and Pollution, A conceptual decomposition of MINLP models for the design of water-using systems
+       Best Obj= $581141.24, 不允许自循环，最小流率为5t/h
+#全局最优目标值的可能并不唯一，这是为何求解析解做不到的原因
+0628更新日志： 加入多起点局部优化寻找高质量可行解程序
+0701更新日志： 加入了asm集合表示允许的连接，进一步精简了模型，加入了管线约束和费用公式
+0702更新日志： 加入了额外的管线约束水流率上下界约束，发现可以显著改善收敛，算例7， 8线程2500s收敛，（进一步基于算术和洞察精简浓度边界？）
+0703更新日志： 加入了仅考虑管线操作费用的NLP模型，Yobjfun=4激活
+0705更新日志： 证明了模型的通用性(可以转化为WUN或者WTN问题)
+0718更新日志： 加入新鲜水到处理单元的连接可能性（稀释水从而提高处理量，减少新鲜水用量的目的）
+0720更新日志： 水处理量上界更新为跟是否考虑循环有关
+0826更新日志： 同时考虑杂质流和水流率限制的fsm边界(暂不加入)
+0827更新日志： 关于是否考虑自循环和系统是否包括循环结构的区别，Fl.UP跟是否考虑自循环无关，跟是否考虑系统循环有关
+
+$offtext
+$eolcom #
+#==============================================================================
+Option solprint = on ;
+Option sysout   = off ;
+option MIP      = Gurobi;
+option MIQCP    = Baron;
+option NLP      = Conopt;#Conopt, Baron
+option QCP      = Conopt;# Gurobi, Baron, Conopt
+option MINLP    = Baron;# Gurobi, Baron, Conopt, Convert, Dicopt
+option optcr    = 0.01;    # eps_{OPT TOL} = 1 * 10^-3
+option reslim   = 3600;# 1 hour time limit
+option decimals = 2;
+option Threads  = 8;
+option bratio = 1;#不使用初始点作为求解器的基
+#==========================代码块==============================================
+$onEcho > TWN_models.gms
+*========================Part 1: Abstract model ================================================
+*Sets, Parameters, variablbes and equations declared on total set
+*Problem Topology
+Sets
+    case 'case index'
+    r_   'Fresh water sources' 
+    u_   'Water using units'
+    l_   'Treatment units' 
+    j_   'discharge sinks'
+    c_   'Components'
+    s_   'Splitters'
+    m_   'Mixers';
+Sets
+    r(r_)  'Instance of fresh water sources'  
+    u(u_)  'Instance of water using units'
+    l(l_)  'Instance of treatment units' 
+    j(j_)  'Instance of discharge sinks(virtual)'
+    uc(u_) 'Instance of water using units of UC type'
+    uf(u_) 'Instance of water using units of UF type'
+    c(c_)  'Instance of components'
+    s(s_)  'Instance of splitters'
+    sr(s_) 'Instance of splitters at the outlet of fresh water sources'
+    sc(s_) 'Instance of splitters at the outlet of water using units of UC type'
+    sf(s_) 'Instance of splitters at the outlet of water using units of UF type'
+    sl(s_) 'Instance of Splitters at the outlet of treatment units'
+    m(m_)  'Instance of mixers'
+    mu(m_) 'Instance of mixers at the inlet of water using units'
+    mc(m_) 'Instance of mixers at the inlet of water using units of UC type'
+    mf(m_) 'Instance of mixers at the inlet of water using units of UF type'
+    ml(m_) 'Instance of Mixers at the inlet of treatment units'
+    mj(m_) 'Instance of mixers at the inlet of discharge sink j';   
+Sets
+    rout(r_,s_)    'Allowable connection between r and s'  
+    uout(u_,s_)    'Allowable connection between u and s'  
+    uin(m_,u_)     'Allowable connection between m and u'
+    lout(l_,s_)    'Allowable connection between l and s'  
+    lin(m_,l_)     'Allowable connection between m and l'
+    jin(m_,j_)     'Allowable connection between m and j'
+    ssm(s_,m_) 'Self-recycled stream(from the outlet of unit XX  to the inlet of unit XX)'
+    asm(s_,m_)     'Allowable connection from s to m'
+    
+;
+Alias (u,ua),(uc,uca),(uf,ufa),(l,la),(sc,sca),(sl,sla);
+*==============================================================================
+Scalar
+    Kloop            'Ratio of flowrate of total flow of cyclic of any unit l/u to the sum of flowrate of total flow of FucU' /3/
+    V_pipe           'Water flow velocity in the  pipeline (s,m), m/s' /1/ #参考自Smith 2007
+    VC_pipe          'Capital Cost coefficient of pipeline (s,m) of the variable part, $/m3/y' /1.001/ #参考自Smith 2007-3603.4/3600---并经过单位换算---
+    FC_pipe          'Capital Cost coefficient of pipeline (s,m) of the fixed part, $/y'/124.6/
+    FpipeUp          'addtitional limitation of maximum allowable water flowrate of the pipe, t/h' /1E+4/#a big enough number
+    FpipeLo          'addtitional limitation of minimum allowable water flowrate of the pipe, t/h' /5/#2-5 
+;
+Parameters
+    #physical related parameters     
+    Prc(r_,c_)       'Concentration of component c of r, 10^3 ppm'
+    PucinU(u_,c_)    'Upper bound of concentration of component c at the inlet of u, 10^3 ppm'
+    PucinL(u_,c_)    'lower bound of concentration of component c at the inlet of u, 10^3 ppm'
+    PuccoutU(u_,c_)  'Upper bound of concentration of component c at the outlet of uc, 10^3 ppm'
+    FucU(u_)         'Upper bound of flowrate of total flow of uc, t/h'
+    FucL(u_)         'lower bound of flowrate of total flow of uc, t/h'
+    Fucc_delta(u_,c_)'Transferred load of flowrate of component flow c of uc from process stream, kg/h'
+    Fufin(u_)        'Flowrate of total flow at the inlet of uf, t/h'
+    Fufout(u_)       'Flowrate of total flow at the outlet of uf, t/h'
+    Pufcout(u_,c_)   'Concentration of component c at the outlet of uf, 10^3 ppm'
+    Rlc(l_,c_)       'Removal ratio of component c of treatment unit l'
+    PlcinU(l_,c_)    'Upper bound of concentration of component c at the inlet of treatment unit l, 10^3 ppm'
+    PjcU(j_,c_)      'Upper bound of concentration of component c at the inlet of discharge sink j, 10^3 ppm'
+    D_pipe(s_,m_)    'length of the pipeline (s,m), m'
+    #Cost related parameters
+    H                'total time of opertion of the plant in one year, hours'
+    Af               'annualized factor for investment on the treatment units or pipeline' 
+    Alpha(l_)        'cost function exponent'
+    Cr(r_)           'freshwater cost of source r, $/t'
+    OCl(l_)          'investment cost coefficient for treatment unit l'
+    ICl(l_)          'operating cost coefficient for treatment unit l'
+
+; 
+Parameters #辅助参数声明(当前上定界模型解参数)
+    Num_connections_USol 'Connection number of the solution ' /1E+5/ #默认值取1E+5
+    Fsm_USol(s_,m_)    'Flowrate of total flow from splitter s to mixer m, t/h'
+    Fl_USol(l_)        'Flowrate of total flow of treatment unit l, t/h, t/h'
+    Plcin_USol(l_,c_)  'Concentration of component c at the inlet of l, ppm'
+    Plcout_USol(l_,c_) 'Concentration of component c at the outlet of l, ppm'                                                
+    Pjc_USol(j_,c_)    'Concentration of component c of discharge sink j, ppm'
+    Puccin_USol        'ppm'
+    Puccout_USol(u_,c_)'ppm'
+    Fuc_USol(u_)       't/h'
+    Fj_USol(j_)        't/h'
+    Fru_USol(r_,u_)
+    Fuu_USol(u_,u_)
+    Ful_USol(u_,l_)
+    Fuj_USol(u_,j_)
+    Flu_USol(l_,u_)
+    Fll_USol(l_,l_)
+    Flj_USol(l_,j_) 
+    YObjfun '选择模型的目标函数'
+    Yucflowratefixed 'uc单元是否固定水流率'
+    Yrecycled
+    Yunitselfrecycled '用水或者水处理单元是否考虑自循环'
+    Ypipe_include '模型是否考虑管线因素'
+    Yrl     '是否考虑新鲜水源r到处理单元l的流股存在'
+    Report(case,*)      'Report'
+    Report_mul(*,*)
+;  
+*=======================================================================
+Positive Variables
+    fsm(s_,m_)       'Flowrate of total flow from splitter s to mixer m, t/h'
+    fr(r_)           'Flowrate of total flow of fresh water source l, t/h'
+    fl(l_)           'Flowrate of total flow of treatment l, t/h'
+    puccout(u_,c_)   'Concentration of component c at the outlet of unit uc, 10^3 ppm'
+    plcout(l_,c_)    'Concentration of component c at the outlet of treatment unit l, 10^3 ppm'
+#Variables used only for MC model
+    fsmc(s_,m_,c_)   'Flowrate of component flow c from splitter sc to mixer m, kg/h'
+Binary variables
+    ysm(s_,m_)       'equal to 1 if the connection (s,m) is exist'
+;
+Free Variable  objval;
+Equations
+    p0_objfun_tf
+    p0_objfun_tac_without_pipe
+    p0_objfun_tac_with_pipe
+    p0_objfun_tac_with_pipe_operating
+    p1(r_)
+    p2(m_,u_,s_)
+    p3(m_,u_)
+    p4(u_,s_)
+    p5(m_,u_,s_,c_)
+*    p5_MC(m_,u_,s_,c_)
+    p6(m_,u_)
+    p7(m_,u_)
+    p8(m_,u_,c_)
+*    p8_MC(m_,u_,c_)
+    p9(m_,u_,c_)
+*    p9_MC(m_,u_,c_)
+    p10(m_,l_,s_)
+    p11(m_,l_)
+    p12(m_,l_,s_,c_)
+    p13(m_,l_,c_)
+    p14(m_,j_,c_)
+    p15(s_,m_)
+    p16(s_,m_)
+*    fsmc_MC1(u_,s_,m_,c_)
+*    fsmc_MC2(u_,s_,m_,c_)
+*    fsmc_MC3(u_,s_,m_,c_)
+*    fsmc_MC4(u_,s_,m_,c_)
+;
+*======================== Models (declared on total set and defined on subset) ================================================
+#objective function: sum of total flowrate of fresh water
+    #总水量为目标函数
+    p0_objfun_tf$(YObjfun = 1)..                          objval =e= sum(r, fr(r)) + sum(l, fl(l)); 
+    #费用最优为目标函数                                                      
+    p0_objfun_tac_without_pipe$(YObjfun = 2)..            objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                     +H*sum(l, OCl(l)*fl(l))
+                                                                     +Af*sum(l, ICl(l)*(fl(l)+1E-5)**Alpha(l))
+                                                                     ;
+    #目标函数总年化费用包括管线费用
+    p0_objfun_tac_with_pipe_operating$(YObjfun = 3)..    objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                    + H*sum(l, OCl(l)*fl(l))
+                                                                    + Af*sum(l, ICl(l)*(fl(l)+1E-5)**Alpha(l))
+                                                                    + Af*sum(asm(s,m), (VC_pipe/V_pipe*fsm(s,m)
+                                                                                        )*D_pipe(s,m))          
+                                                                    ;
+    p0_objfun_tac_with_pipe$(YObjfun = 4)..              objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                    + H*sum(l, OCl(l)*fl(l))
+                                                                    + Af*sum(l, ICl(l)*(fl(l)+1E-5)**Alpha(l))
+                                                                    + Af*sum(asm(s,m), (VC_pipe/V_pipe*fsm(s,m)
+                                                                                       + FC_pipe*ysm(s,m))*D_pipe(s,m))          
+                                                                     ;
+                                                           
+    #mass balance of total flow at r
+    p1(r)..                                     fr(r) =e= sum((sr,m)$(rout(r,sr) and asm(sr,m)), fsm(sr,m)); 
+    #mass balance of total flow at uc 
+    p2(mc,uc,sc)$(uin(mc,uc) and uout(uc,sc))..
+                                                sum(s$asm(s,mc), fsm(s,mc)) =e= sum(m$asm(sc,m), fsm(sc,m));
+    #mass balance of total flow at the inlet of uf 
+    p3(mf,uf)$uin(mf,uf)..                      sum(s$asm(s,mf), fsm(s,mf)) =e= Fufin(uf);
+    #mass balance of total flow at the outlet of uf 
+    p4(uf,sf)$uout(uf,sf)..                     Fufout(uf) =e= sum(m$asm(sf,m), fsm(sf,m));
+    #---mass balance of component flow c at uc 
+    p5(mc,uc,sc,c)$(uin(mc,uc) and uout(uc,sc))..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,mc)), fsm(sr,mc)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,mc)), fsm(sf,mc)*Pufcout(uf,c))
+                                                + sum((uca,sca)$(uout(uca,sca) and asm(sca,mc)), fsm(sca,mc)*puccout(uca,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,mc)), fsm(sl,mc)*plcout(l,c))
+                                                + Fucc_delta(uc,c)
+                                                =e=
+                                                puccout(uc,c)*sum(m$asm(sc,m), fsm(sc,m));
+                                           
+####额外定义一个集合包括sc+sl的sp
+#mass balance of component flow c at uc in MC                                           
+*p5_MC(mc,uc,sc,c)$(uin(mc,uc) and uout(uc,sc))..
+*                                           sum((r,sr)$rout(r,sr), fsm(sr,mc)*Prc(r,c)) 
+*                                           + sum((uf,sf)$(uout(uf,sf) and not ssm(sf,mc)), fsm(sf,mc)*Pufcout(uf,c)) 
+*                                           + sum(sca$(not ssm(sca,mc)), fsmc(sca,mc,c)) 
+*                                           + sum(sl$(not ssm(sl,mc)), fsmc(sl,mc,c))
+*                                           Fucc_delta(uc,c)
+*                                           =e=
+*                                           sum(m$(not ssm(sc,m), fsmc(sc,m,c));
+
+
+    #upper bound  of total flow at the inlet of uc 
+    p6(mc,uc)$uin(mc,uc)..                      sum(s$asm(s,mc), fsm(s,mc)) =l= FucU(uc);
+    #lower bound  of total flow at the inlet of uc 
+    #p7(mc,uc)$uin(mc,uc)..                      sum(s$(not ssm(s,mc)), fsm(s,mc)) =g= smax(c, Fucc_delta(uc,c)/puccout.UP(uc,c));
+    p7(mc,uc)$uin(mc,uc)..                     sum(s$asm(s,mc), fsm(s,mc)) =g= FucL(uc);
+    #upper bound  of component flow c at the inlet of u
+    p8(m,u,c)$uin(m,u)..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,m)), fsm(sr,m)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,m)), fsm(sf,m)*Pufcout(uf,c)) 
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,m)), fsm(sc,m)*puccout(uc,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,m)), fsm(sl,m)*plcout(l,c))
+                                                =l=
+                                                PucinU(u,c)*sum(s$asm(s,m), fsm(s,m));
+#upper bound  of component flow c at the inlet of u in MC
+*p8_MC(m,u,c)$uin(m,u)..
+*                                           sum((r,sr)$rout(r,sr),   fsm(sr,m)*Prc(r,c)) 
+*                                           + sum((uf,sf)$$(uout(uf,sf) and not ssm(sf,m)), fsm(sf,m)*Pufcout(uf,c)) 
+*                                           + sum(sc$(not ssm(sc,m), fsmc(sc,m,c))
+*                                           + sum(sl$(not ssm(sl,mc)), fsmc(sl,m,c))
+*                                           =l=
+*                                           PucinU(u,c)*sum(s$(not ssm(s,m), fsm(s,m));                                                                                    
+    #lower bound  of component flow c at the inlet of u
+    p9(m,u,c)$uin(m,u)..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,m)),   fsm(sr,m)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,m)), fsm(sf,m)*Pufcout(uf,c)) 
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,m)), fsm(sc,m)*puccout(uc,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,m)), fsm(sl,m)*plcout(l,c))
+                                                =g=
+                                                PucinL(u,c)*sum(s$asm(s,m), fsm(s,m));
+*p9_MC(m,u,c)$uin(m,u)..
+*                                           sum((r,sr)$rout(r,sr),   fsm(sr,m)*Prc(r,c)) 
+*                                           + sum((uf,sf)$uout(uf,sf), fsm(sf,m)*Pufcout(uf,c)) 
+*                                           + sum(sc, fsmc(sc,m,c))
+*                                           =g=
+*                                           PucinL(u,c)*sum(s, fsm(s,m));                                      
+
+    #mass balance of total flow at l 
+    p10(ml,l,sl)$(lin(ml,l) and lout(l,sl)) ..  sum(s$asm(s,ml), fsm(s,ml)) =e= sum(m$asm(sl,m), fsm(sl,m));
+ 
+    #explicit expression of total flow at l
+    p11(ml,l)$(lin(ml,l)) ..                    sum(s$asm(s,ml), fsm(s,ml)) =e= fl(l);
+
+    #mass balance of component flow c  at l
+    p12(ml,l,sl,c)$(lout(l,sl) and lin(ml,l))..
+                                                sum(m$asm(sl,m), fsm(sl,m))*plcout(l,c) =e= (1- Rlc(l,c))*
+                                                ( sum((r,sr)$(rout(r,sr) and asm(sr,ml)), fsm(sr,ml)*Prc(r,c))
+                                                  + sum((uf,sf)$(uout(uf,sf) and asm(sf,ml)), fsm(sf,ml)*Pufcout(uf,c))
+                                                  + sum((uc,sc)$(uout(uc,sc) and asm(sc,ml)), fsm(sc,ml)*puccout(uc,c))
+                                                  + sum((la,sla)$(lout(la,sla) and asm(sla,ml)), fsm(sla,ml)*plcout(la,c))
+                                                );
+    #Concentration upper bound of component  c  at lin
+    p13(ml,l,c)$lin(ml,l)..                     sum((r,sr)$(rout(r,sr) and asm(sr,ml)), fsm(sr,ml)*Prc(r,c))
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,ml)), fsm(sf,ml)*Pufcout(uf,c))
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,ml)), fsm(sc,ml)*puccout(uc,c))
+                                                + sum((la,sla)$(lout(la,sla) and asm(sla,ml)), fsm(sla,ml)*plcout(la,c))
+                                                =l=
+                                                PlcinU(l,c)*sum(s$asm(s,ml), fsm(s,ml));
+
+
+    #Concentration upper bound of component  c  at mjin
+    p14(mj,j,c)$jin(mj,j)..                     sum((uf,sf)$(uout(uf,sf) and asm(sf,mj)), fsm(sf,mj)*Pufcout(uf,c))
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,mj)), fsm(sc,mj)*puccout(uc,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,mj)), fsm(sl,mj)*plcout(l,c))
+                                                =l=
+                                                PjcU(j,c)*sum(s$asm(s,mj), fsm(s,mj));                                
+
+    #logical constraint of fsm and ysm
+    p15(s,m)$(asm(s,m) and Ypipe_include)..                        fsm(s,m) =l= min(FpipeUp, fsm.Up(s,m))*ysm(s,m);
+    p16(s,m)$(asm(s,m) and Ypipe_include)..                        fsm(s,m) =g= max(FpipeLo, fsm.Lo(s,m))*ysm(s,m);
+    
+    #=======hard Bound===(added later through data insights)
+
+
+*========================Mc envelope for relaxed variables(#8)=========
+#fsmc(s_,m_,c_)   'Flowrate of component flow c from splitter sc to mixer m, kg/h'
+*fsmc_MC1(uc,sc,m,c)$uout(uc,sc)..          fsmc(sc,m,c) =g= puccout.UP(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.UP(sc,m) -
+*                                                            puccout.UP(uc,c)*fsm.UP(sc,m);
+*fsmc_MC2(uc,sc,m,c)$uout(uc,sc)..          fsmc(sc,m,c) =g= puccout.LO(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.LO(sc,m) -
+*                                                            puccout.LO(uc,c)*fsm.LO(sc,m);
+*fsmc_MC3(uc,sc,m,c)$uout(uc,sc)..          fsmc(sc,m,c) =l= puccout.UP(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.LO(sc,m) -
+*                                                            puccout.UP(uc,c)*fsm.LO(sc,m);
+*fsmc_MC4(uc,sc,m,c)$uout(uc,sc)..          fsmc(sc,m,c) =l= puccout.LO(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.UP(sc,m) -
+*                                                            puccout.LO(uc,c)*fsm.UP(sc,m);
+                                                            
+*fsmc_MC1(uc,sc,m,c)$uout(uc,sc)..          fsm(sc,m)*puccout(uc,c) =g= puccout.UP(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.UP(sc,m) -
+*                                                                       puccout.UP(uc,c)*fsm.UP(sc,m);
+*fsmc_MC2(uc,sc,m,c)$uout(uc,sc)..          fsm(sc,m)*puccout(uc,c) =g= puccout.LO(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.LO(sc,m) -
+*                                                                       puccout.LO(uc,c)*fsm.LO(sc,m);
+*fsmc_MC3(uc,sc,m,c)$uout(uc,sc)..          fsm(sc,m)*puccout(uc,c) =l= puccout.UP(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.LO(sc,m) -
+*                                                                       puccout.UP(uc,c)*fsm.LO(sc,m);
+*fsmc_MC4(uc,sc,m,c)$uout(uc,sc)..          fsm(sc,m)*puccout(uc,c) =l= puccout.LO(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.UP(sc,m) -
+*                                                            puccout.LO(uc,c)*fsm.UP(sc,m);
+$offecho                                                              
+$include TWN_models
+Model TWN/
+    p0_objfun_tf
+    p0_objfun_tac_without_pipe
+    p0_objfun_tac_with_pipe
+    p1
+    p2       
+    p3
+    p4
+    p5
+    p6
+    p7
+    p8
+    p9
+    p10
+    p11
+    p12
+    p13
+    p14
+    p15
+    p16
+    /;
+Model TWN_MC/
+    p0_objfun_tf
+    p1
+    p2       
+    p3
+    p4
+*    p5_MC
+    p6
+    p7
+*    p8_MC
+*    p9_MC
+*    fsmc_MC1
+*    fsmc_MC2
+*    fsmc_MC3
+*    fsmc_MC4
+    /;    
+$onecho > Data_input.gms
+* ==================================Part 2: Data import======================
+*Sets
+* This part includes set and data definition,also includes hard bounds of Variables
+Sets
+    case /Ex1*Ex36/
+    r_   /1*10/  
+    u_   /1*20/
+    l_   /1*20/
+    j_   /1/
+    c_   /1*10/     
+    s_   /1*50/      
+    m_   /1*50/
+;
+*Problem Parameters of all cases
+
+Table Prc_all(case,r_,c_)
+                1       2       3       4       5       6
+    Ex1.1       0       0
+    Ex2.1       0       0
+    Ex3.1       0       0
+    Ex4.1       0       0       0
+    Ex5.1       0       0       0
+    Ex6.1       0       0       0
+    Ex7.1       0       0       0
+;
+
+#               1       2       3       4       5       6 
+Table PucinU_all(case,u_,c_)
+                1       2       3       4       5       6   
+    Ex1.1       0       0
+    Ex1.2       50      50
+    Ex2.1       0       0
+    Ex2.2       50      50
+    Ex2.3       50      50
+    Ex3.1       0       0
+    Ex3.2       50      50
+    Ex3.3       50      50
+    Ex3.4       50      50
+    
+    Ex4.1       0       0       0
+    Ex4.2       50      50      50
+    Ex4.3       50      50      50
+    Ex4.4       50      50      50
+    Ex4.5       25      25      25
+
+    Ex5.1       0       0       0
+    Ex5.2       50      40      15
+    Ex5.3       60      60      40
+
+    Ex6.1       0       0       0
+    Ex6.2       20      300     45
+    Ex6.3       120     20      200
+    Ex6.4       0       0       0
+    Ex6.5       50      400     60
+    
+    Ex7.1       0       0       0
+    Ex7.2       20      300     45
+    Ex7.3       120     20      200
+    Ex7.4       0       0       0
+    Ex7.5       50      400     60
+#               1       2       3       4       5       6 
+;
+
+Table Fucc_delta_all(case,u_,c_) #kg/h
+                1       2       3       4       5       6   
+    Ex1.1       1       1.5
+    Ex1.2       1       1
+    Ex2.1       1       1.5
+    Ex2.2       1       1
+    Ex2.3       1       1
+    Ex3.1       1       1.5
+    Ex3.2       1       1
+    Ex3.3       1       1
+    Ex3.4       2       2
+    
+    Ex4.1       1       1.5     1
+    Ex4.2       1       1       1
+    Ex4.3       1       1       1
+    Ex4.4       2       2       2
+    Ex4.5       1       1       0
+
+    Ex5.1       3       2.4     1.8  #注意单位换算
+    Ex5.2       4       3       3.6
+    Ex5.3       1.5     0.6     2
+
+    Ex6.1       0.75    20      1.75  #注意单位换算
+    Ex6.2       3.4     414.8   4.59
+    Ex6.3       5.6     1.4     520.8
+    Ex6.4       0.16    0.48    0.16
+    Ex6.5       0.8     60.8    0.48
+
+    Ex7.1       0.75    20      1.75  #注意单位换算
+    Ex7.2       3.4     414.8   4.59
+    Ex7.3       5.6     1.4     520.8
+    Ex7.4       0.16    0.48    0.16
+    Ex7.5       0.8     60.8    0.48
+#               1       2       3       4       5       6 
+
+Parameter PucinL_all(case,u_,c_), Pufcout_all(case,u_,c_);
+    PucinL_all(case,u_,c_) = 0; Pufcout_all(case,u_,c_) = 0;
+
+Table FucU_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10         
+    Ex1         40    50
+    Ex2         40    50     60
+    Ex3         40    50     60     70
+    Ex4         40    50     60     70     80
+    Ex5         30    40     20
+    Ex6         50    34     56     8      8
+    Ex7         50    34     56     8      8
+#               1     2      3      4      5      6      7      8      9      10 
+;   
+Table Fufin_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10    
+    Ex1
+;
+#               1     2      3      4      5      6      7      8      9      10  
+Table Fufout_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10    
+    Ex1                            
+;
+#               1     2      3      4      5      6      7      8      9      10  
+Table PjcU_all(case,j_,c_)
+            1    2    3      4      5      6    
+    Ex1.1   10   10
+    Ex2.1   10   10
+    Ex3.1   10   10
+    Ex4.1   10   10   10
+    Ex5.1   30   20   15
+    Ex6.1   20   5    100
+    Ex7.1   20   5    100
+;
+
+Table Rlc_all(case,l_,c_)
+            1      2      3      4      5      6
+    Ex1.1   0.95   0
+    Ex1.2   0      0.95
+    Ex2.1   0.95   0
+    Ex2.2   0.8    0.9
+    Ex2.3   0      0.95
+    Ex3.1   0.95   0
+    Ex3.2   0      0.90
+    Ex4.1   0.95   0      0
+    Ex4.2   0      0      0.95
+    Ex4.3   0      0.95   0
+    Ex5.1   0.7    0.8    0.85
+    Ex5.2   0.5    0.6    0.4
+    Ex6.1   0      0.999  0
+    Ex6.2   0.7    0.9    0.98
+    Ex6.3   0.95   0      0.5
+    Ex7.1   0      0.999  0
+    Ex7.2   0.7    0.9    0.98
+    Ex7.3   0.95   0      0.5
+#           1      2      3      4      5      6
+;   
+Table PlcinU_all(case,l_,c_) #输入规定的进口杂质浓度
+            1       2      3      4      5      6
+    Ex1.1   1E+5    1E+5
+    Ex1.2   1E+5    1E+5
+    Ex2.1   1E+5    1E+5
+    Ex2.2   1E+5    1E+5
+    Ex2.3   1E+5    1E+5
+    Ex3.1   1E+5    1E+5
+    Ex3.2   1E+5    1E+5
+    Ex3.3   1E+5    1E+5
+    Ex4.1   1E+5    1E+5   1E+5
+    Ex4.2   1E+5    1E+5   1E+5
+    Ex4.3   1E+5    1E+5   1E+5
+    Ex5.1   1E+5    1E+5   1E+5
+    Ex5.2   1E+5    1E+5   1E+5
+    Ex6.1   1E+6    1E+6   1E+6
+    Ex6.2   1E+6    1E+6   1E+6
+    Ex6.3   1E+6    1E+6   1E+6
+    Ex7.1   1E+6    1E+6   1E+6
+    Ex7.2   1E+6    1E+6   1E+6
+    Ex7.3   1E+6    1E+6   1E+6
+#           1       2      3      4      5      6
+;
+
+#----费用相关------
+Parameter H_all(case);
+    H_all('Ex2') = 8000;
+    H_all('Ex3') = 8000;
+    H_all('Ex4') = 8000;
+    H_all('Ex5') = 8600;
+    H_all('Ex6') = 8600;
+    H_all('Ex7') = 8600;
+Parameter Af_all(case);
+    Af_all('Ex2') = 0.1;
+    Af_all('Ex3') = 0.1;
+    Af_all('Ex4') = 0.1;
+    Af_all('Ex5') = 1/1.55;#10% ，3 year = 0.4021148 /,  Fan 1/1.55
+    Af_all('Ex6') = 1/1.55;#，0.1
+    Af_all('Ex7') = 0.1;
+    
+Table Cr_all(case,r_) '$/t'
+          1     2      3      4      5      6      7      8      9      10    
+    Ex2   1
+    Ex3   1
+    Ex4   1
+    Ex5   1
+    Ex6   1
+    Ex7   0.2 
+#         1     2      3      4      5      6      7      8      9      10
+    
+Table Alpha_all(case,l_)
+            1      2      3      4      5      6
+    Ex2     0.7    0.7    0.7
+    Ex3     0.7    0.7
+    Ex4     0.7    0.7    0.7
+    Ex5     0.7    0.7
+    Ex6     0.7    0.7    0.7
+    Ex7     0.7    0.7    0.7
+#           1      2      3      4      5      6
+; 
+Table OCl_all(case,l_)
+            1      2      3      4      5      6
+    Ex2     1      0.033  0.0067
+    Ex3     1      0.0067
+    Ex4     1      0.04   0.0067
+    Ex5     1      0.0067
+    Ex6     1      0.0067 0
+    Ex7     1      0.0067 0
+#           1      2      3      4      5      6
+;
+Table ICl_all(case,l_)
+            1      2      3      4      5      6
+    Ex2     16800  24000  12600
+    Ex3     16800  12600
+    Ex4     16800  9500   12600
+    Ex5     16800  12600
+    Ex6     16800  12600  4800
+    Ex7     16800  12600  4800
+#           1      2      3      4      5      6
+;
+Table D_pipe_all(case,s_,m_) 'distance from s to m, m'
+            1      2      3      4      5      6      7      8      9
+    Ex7.1   0      30     80     150    400    90     150    200    1200
+    Ex7.2   30     0      60     100    165    100    150    150    1000
+    Ex7.3   80     60     0      50     75     120    90     350    800
+    Ex7.4   150    100    50     0      150    250    170    400    650
+    Ex7.5   400    165    75     150    0      300    120    200    300
+    Ex7.6   90     100    120    250    300    0      125    80     250
+    Ex7.7   150    150    90     170    120    125    0      35     100
+    Ex7.8   200    150    350    400    200    80     35     0      100
+    Ex7.9   30     25     70     50     90     200    500    600    2000
+#           1      2      3      4      5      6      7      8      9
+;   
+$offecho
+$include Data_input
+
+#YObjfun = 1-新鲜水用量+水处理量, 2-总年化费用不包括管线,  3-总年化费用仅包括管线运行费, 4-总年化费用包括管线,
+*======================Step 0： 模型,数据和参数设置导入=====================
+#TWN.optfile = 1;
+*TWN.solprint = 2;
+*TWN_RP_PN.solprint = 2;
+*TWN_RP_PN_Abt.solprint = 2;
+*TWN_RP_PN_Abt.optfile = 2;#2对应的是模型的Abt属性文件，如果两个模型都使用1，则可能会造成一个属性文件包括不同的属性，会冲突
+Scalar
+    YGOstep1 'implement step 1 in GO or not' /1/,#默认没必要用，除非要执行边界紧缩或者上下定界模型交互
+    YGOstep2_3 'implement step 2&3 in GO or not' /0/
+    YGOstep4 'implement step 4(abt) in GO or not'/0/
+    Gap 'current gap' /+Inf/, Gap_tol 'Gap tolerance' /1E-3/
+    Dynamic_factor 'added partitions adjust factor '/0.1/#越大每轮增加的分割变量越少，等于1相当于大于均值的, 目前看取中小规模取0.1是最佳的，大和特大规模问题则建议取1，其实影响并不大，都取1就好
+    Gap_rp_tol  'rel_gap for RP'/0/#默认RP求到最优解 误差为0
+    NitermulU 'round upper bound for multistart'/1/
+;
+#--- Data Setting for GO (Step 1)---
+Set itermul 'multistart total rounds'/1*1000/;
+Scalar Time_start_1,Time_start_2;
+#多起点停止辅助集合和参数
+Set sol_ /1*1000/;
+Set sol(sol_); sol(sol_) = no;
+Parameter
+    Objvalcou(sol_) '第sol局部解对应的目标值'
+    Freq(sol_)  '第sol局部解对应的出现次数'
+    Ysol_add  '判断是否增加了频数'
+;
+    Objvalcou(sol_) = 0;
+    Freq(sol_) = 0;  
+Set itermul_b '冒泡排序迭代轮次索引'/1*1000/;
+Scalar Aul '冒泡排序辅助参数';
+
+#--- Data Setting for GO (Step 2 and 3)---
+Scalar
+    LB 'current lower bound' /-1E+10/, UB 'current upper bound' /+1E+10/
+;
+#Parameters for bound update and tighting
+Parameters
+    Caseindex '案例索引'
+;
+
+loop(case$(ord(case)=7),
+#loop(case$(ord(case)>0 and ord(case)<=card(case)),
+    Caseindex = ord(case);
+    display '=================================================',Caseindex;
+    LB =-1E+10; UB =+1E+10; 
+    #优化目标选择
+    YObjfun$(ord(case)=1) = 1;
+    YObjfun$(ord(case)>1 and ord(case)<7) = 2;
+    YObjfun$(ord(case)=7) = 4;
+    
+    Yucflowratefixed$(ord(case)<5) = 1;
+    Yucflowratefixed$(ord(case)>=5) = 0;
+    
+    Ypipe_include$(ord(case)=7) = 1;
+    Ypipe_include$(ord(case)<7) = 0;
+    
+    Yrecycled = 1;#默认允许系统循环
+    Yunitselfrecycled = 0;#默认不允许自循环
+    Yrl = 0;#默认不允许frt
+    
+    # extract domains for current problem(optional)
+    r(r_) =yes$((ord(r_) = 1) or (ord(r_) > 1 and sum(c_$Prc_all(case,r_,c_), 1)));#注意要合在一起写
+    l(l_) = sum(c_$Rlc_all(case,l_,c_), 1);
+    j(j_) = yes$((ord(j_) = 1) or (ord(j_) > 1 and sum(c_$PjcU_all(case,j_,c_), 1)));
+    uc(u_) = FucU_all(case,u_);
+    uf(u_) = Fufin_all(case,u_);
+    u(u_) = uc(u_) + uc(u_);#基于总流率上界判断合理
+    c(c_) = sum(u_$PucinU_all(case,u_,c_), 1);
+    s(s_) = yes$(ord(s_) <= card(r) + card(u) + card(l)); 
+    sc(s_) = yes$(s(s_) and ord(s_) <= card(uc));
+    sf(s_) = yes$(s(s_) and ord(s_) > card(uc) and ord(s_) <= card(u));
+    sl(s_) = yes$(s(s_) and ord(s_) > card(u) and ord(s_) <= card(u) + card(l));
+    sr(s_) = yes$(s(s_) and ord(s_) > card(u) + card(l));
+    m(m_) = yes$(ord(m_) <= card(u) + card(l) + card(j));
+    mu(m_) = yes$(m(m_) and ord(m_) <= card(u));
+    mc(m_) = yes$(m(m_) and ord(m_) <= card(uc));
+    mf(m_) = yes$(m(m_) and ord(m_) > card(uc) and ord(m_) <= card(u));
+    ml(m_) = yes$(m(m_) and ord(m_) > card(u) and ord(m_) <= card(u) + card(l));
+    mj(m_) = yes$(m(m_) and ord(m_) > card(u) + card(l));
+    #二维子集合指定映射关系
+    uout(u_,s_) =  yes$(u(u_) and (ord(s_) = ord(u_)));
+    lout(l_,s_) =  yes$(l(l_) and (ord(s_) = ord(l_) + card(u)));
+    rout(r_,s_) =  yes$(r(r_) and (ord(s_) = ord(r_) + card(u) + card(l)));
+    uin (m_,u_) =  yes$(u(u_) and (ord(m_) = ord(u_)));
+    lin (m_,l_) =  yes$(l(l_) and (ord(m_) = ord(l_) + card(u)));
+    jin (m_,j_) =  yes$(j(j_) and (ord(m_) = ord(j_) + card(u) + card(l)));
+    #sm子集合
+    ssm(s_,m_) = yes$((sc(s_) or sf(s_) or sl(s_)) and (mu(m_) + ml(m_)) and (ord(s_)=ord(m_)));#自循环的分支流股
+    #允许连接的流股集合
+    asm(s_,m_)$(1-Yunitselfrecycled and (1-Yrl)) = yes$(s(s_) and m(m_) and (not(sr(s_) and ml(m_))) and (not(sr(s_) and mj(m_)))
+                                                        and (not ssm(s_,m_)) #不允许自循环, 不包括frt
+                                                        );
+    asm(s_,m_)$(Yunitselfrecycled and (1-Yrl)) = yes$(s(s_) and m(m_) and (not(sr(s_) and ml(m_))) and (not(sr(s_) and mj(m_))));  
+
+    asm(s_,m_)$((1-Yunitselfrecycled) and Yrl) = yes$(s(s_) and m(m_) and (not(sr(s_) and mj(m_)))
+                                                      and (not ssm(s_,m_)) #包括frt,不允许自循环
+                                                     );
+    asm(s_,m_)$(Yunitselfrecycled and Yrl) = yes$(s(s_) and m(m_) and (not(sr(s_) and mj(m_)))); #包括frt,允许自循环
+       
+    #
+    display ssm, asm; 
+    # extract data(输入的边界值)
+    Prc(r,c) = Prc_all(case,r,c)*1E-3;#单位换算为10^3 ppm
+    PucinU(u,c) = PucinU_all(case,u,c)*1E-3;
+    PucinL(u,c) = PucinL_all(case,u,c)*1E-3;
+    FucU(uc) = FucU_all(case,uc);
+    Fucc_delta(uc,c) = Fucc_delta_all(case,uc,c);
+    PuccoutU(uc,c) = Fucc_delta(uc,c)/FucU(uc) + PucinU(uc,c);
+    #display PuccoutU; 
+    Fufin(uf) = Fufin_all(case,uf);
+    Fufout(uf) = Fufout_all(case,uf);
+    Pufcout(uf,c) = Pufcout_all(case,uf,c)*1E-3;
+    Rlc(l,c) = Rlc_all(case,l,c);  
+    PlcinU(l,c) = PlcinU_all(case,l,c)*1E-3;
+    PjcU(j,c) = PjcU_all(case,j,c)*1E-3;
+    D_pipe(s,m) = D_pipe_all(case,s,m);
+    #display r, u, l, j, uc, uf, c, s, sc, sf, sl, sr, m, mu, mc, mf, ml, mj, uout, lout, rout, uin, lin, jin, Loop_sm;
+    #display Prc, PucinU, PuccoutU, FucU, Fucc_delta, Fufin, Fufout, Pufcout, Rlc;
+    #display D_pipe; 
+    #费用参数输入
+    H = H_all(case);           
+    Af = Af_all(case);            
+    Alpha(l) = Alpha_all(case,l);       
+    Cr(r)= Cr_all(case,r);           
+    OCl(l) = OCl_all(case,l);          
+    ICl(l) = ICl_all(case,l);
+    #display H,Af,Alpha,Cr,OCl,ICl;
+#============ hard bound(同时考虑输入和拓扑结构推导)============
+    fsm.UP(sr,ml)$asm(sr,ml) = sum(uf, Fufout(uf)) + sum(uc, FucU(uc));
+    fsm.UP(sr,mc)$asm(sr,mc) = sum(uc$uin(mc,uc), FucU(uc));
+    fsm.UP(sr,mf)$asm(sr,mf) = sum(uf$uin(mf,uf), Fufin(uf));
+    fsm.UP(sc,mc)$asm(sc,mc) = min(sum(uca$uout(uca,sc), FucU(uca)), sum(uc$uin(mc,uc), FucU(uc)));
+    fsm.UP(sc,mf)$asm(sc,mf) = min(sum(uc$uout(uc,sc), FucU(uc)), sum(uf$uin(mf,uf), Fufin(uf)));
+    fsm.UP(sc,ml)$asm(sc,ml) = sum(uc$uout(uc,sc), FucU(uc));
+    fsm.UP(sc,mj)$asm(sc,mj) = sum(uc$uout(uc,sc), FucU(uc));
+    fsm.UP(sf,mc)$asm(sf,mc) = min(sum(uf$uout(uf,sf), Fufout(uf)), sum(uc$uin(mc,uc), FucU(uc)));
+    fsm.UP(sf,mf)$asm(sf,mf) = min(sum(ufa$uout(ufa,sf), Fufout(ufa)), sum(uf$uin(mf,uf), Fufin(uf)));
+    fsm.UP(sf,ml)$asm(sf,ml) = sum(uf$uout(uf,sf), Fufout(uf));
+    fsm.UP(sf,mj)$asm(sf,mj) = sum(uf$uout(uf,sf), Fufout(uf));    
+
+    fsm.UP(sl,mj)$asm(sl,mj) = sum(uf, Fufout(uf)) + sum(uc, FucU(uc));
+    fsm.UP(sl,ml)$asm(sl,ml) = sum(uf, Fufout(uf)) + sum(uc, FucU(uc)); 
+    fsm.UP(sl,mc)$asm(sl,mc) = sum(uc$uin(mc,uc), FucU(uc));
+    fsm.UP(sl,mf)$asm(sl,mf) = sum(uf$uin(mf,uf), Fufin(uf));
+    fsm.UP(s_,m_)$(asm(s_,m_) and (ord(s_)=ord(m_)) and ( (sc(s_) and mc(m_)) or ( (sl(s_) and ml(m_))) or ( sf(s_) and mf(m_)) ) and Yunitselfrecycled ) = Kloop*(sum(uf, Fufout(uf)) + sum(uc, FucU(uc)));#循环流股水量限制
+    fl.UP(l)$Yrecycled = Kloop*(sum(uf, Fufout(uf)) + sum(uc, FucU(uc)));#上界跟是否允许系统包括循环有关
+    fl.UP(l)$(1-Yrecycled) = sum(uf, Fufout(uf)) + sum(uc, FucU(uc));#上界跟是否允许系统包括循环有关
+    #
+    display fsm.UP, fl.UP;
+    PucinU(u,c) = PucinU(u,c);
+    #PucinL(u,c) = 0;
+    puccout.UP(uc,c) = PuccoutU(uc,c);
+    puccout.LO(uc,c) = Fucc_delta(uc,c)/FucU(uc);#这个很关键，因为直接参与BL项
+    #puccout.LO(uc,c) = 0; 
+    PlcinU(l,c) = min(PlcinU(l,c), max(smax(uf, Pufcout(uf,c)), smax(uc, PuccoutU(uc,c))));
+    plcout.UP(l,c) = (1 - Rlc(l,c))*PlcinU(l,c);
+    #plcout.LO(l,c) = 0;
+    FucL(uc)$Yucflowratefixed = FucU_all(case,uc);#固定用水单元uc水流率
+    FucL(uc)$(1-Yucflowratefixed) = 0;#不固定用水单元uc水流率
+    FucL(uc) = max(FucL(uc), smax(c, Fucc_delta(uc,c)/puccout.UP(uc,c)));
+    #display fsm.UP, PucinU, PucinL, puccout.UP, puccout.LO;
+    #display PlcinU, plcout.UP, plcout.LO, FucU, FucL;
+    
+    #针对算例7的打断循环结构操作(基于结果逐步打断)
+*    fsm.UP('8','7') = 0;#l3-l2
+*    fsm.UP('7','3') = 0; #l2-uc3   
+*    fsm.UP('7','2') = 0; #l2-uc2
+*    
+*    fsm.UP('8','3') = 0; #l2-uc3   
+*    fsm.UP('8','2') = 0; #l2-uc2
+*    
+*    fsm.UP('6','2') = 0; #l2-uc2
+*    fsm.UP('6','2') = 0; #l2-uc2
+*    
+*    fsm.UP('3','2') = 0; #uc3-uc2   
+#=============MC solve=========
+#Solve TWN_MC using LP minimizing objval;
+#Report(case,'Obj_MC') = TWN_MC.objVal;
+#============UBsolve&renew===========
+    
+
+    #======================== Global optimization algorithm ================================
+    #---------------------------------------------------------------------------------------
+    #------------------------ GO-Step 1：multistart local optimization ---------------------
+    #---------------------------------------------------------------------------------------
+    Time_start_1 = timeExec;
+    if(YGOstep1,
+        loop(itermul$(ord(itermul)<=NitermulU),
+            puccout.L(uc,c) = uniform(puccout.Lo(uc,c), puccout.Up(uc,c));
+            plcout.L(l,c) = uniform(plcout.Lo(l,c), plcout.Up(l,c));
+            fsm.L(s,m)$asm(s,m) = uniform(fsm.Lo(s,m), fsm.Up(s,m));
+            fl.L(l) = uniform(fl.Lo(l), fl.Up(l));
+            ysm.L(s,m)$(asm(s,m) and Ypipe_include) = uniform(0, 1);#dicopt首先解的是rMINLP问题
+            #WTN.solprint = 2;
+            solve TWN using MINLP minimizing objval     
+            #Report_mul(itermul,'NLP_stat')= TWN.modelstat;
+            #Report_mul(itermul,'Solving_Time') = TWN.ResUsd;
+            if(TWN.modelstat = 1 or TWN.modelstat = 2 or TWN.modelstat = 7 or TWN.modelstat = 8,
+                Report_mul(itermul,'Objval_local')= objval.L;
+                #------------step 1.1:对局部解进行统计----
+                Ysol_add = 0;
+                loop(sol,
+                    if(abs(objval.L - Objvalcou(sol))<1E-3,#如果没发现新解
+                        Freq(sol) = Freq(sol) + 1;
+                        Ysol_add = 1;
+                    );
+                );
+                if(Ysol_add = 0, #如果发现新的局部解
+                    sol(sol_)$(ord(sol_) = (card(sol)+1)) = yes;
+                    Objvalcou(sol_)$(ord(sol_) = card(sol)) = objval.L;
+                    Freq(sol_)$(ord(sol_) = card(sol)) = 1; 
+                );
+                #display sol, Objvalcou, Freq;
+                
+                #------------step 1.2：更新最优解--------- 
+                if(objval.L < UB,#更新最优解
+                    UB = objval.L; 
+                    Fsm_USol(s,m) = fsm.L(s,m);   
+                    Fl_USol(l) = sum((sl,m)$lout(l,sl), fsm.L(sl,m));
+                    Plcout_USol(l,c)$(Fl_USol(l)>0) = plcout.L(l,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算
+                    Fuc_USol(uc) = sum((sc,m)$uout(uc,sc), fsm.L(sc,m));
+                    Puccin_USol(uc,c)$(Fuc_USol(uc)>0) = (puccout.L(uc,c) - Fucc_delta(uc,c)/Fuc_USol(uc))*1E+3; 
+                    Puccout_USol(uc,c)$(Fuc_USol(uc)>0) = puccout.L(uc,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算
+                    Fj_USol(j) = sum((uf,sf,mj)$(uout(uf,sf) and jin(mj,j)), fsm.L(sf,mj))
+                               + sum((uc,sc,mj)$(uout(uc,sc) and jin(mj,j)), fsm.L(sc,mj))
+                               + sum((l,sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj))
+                               ;
+                    Pjc_USol(j,c) = (sum((uf,sf,mj)$(uout(uf,sf) and jin(mj,j)), fsm.L(sf,mj)*Pufcout(uf,c))
+                                  + sum((uc,sc,mj)$(uout(uc,sc) and jin(mj,j)), fsm.L(sc,mj)*puccout.L(uc,c))
+                                  + sum((l,sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj)*plcout.L(l,c)))/Fj_USol(j)*1E+3;
+                    Fru_USol(r,u) = sum((sr,mu)$(rout(r,sr) and uin(mu,u)), fsm.L(sr,mu)); 
+                    Fuu_USol(u,ua) = sum((s,mu)$(uout(u,s) and uin(mu,ua)), fsm.L(s,mu)); 
+                    Ful_USol(u,l) = sum((s,ml)$(uout(u,s) and lin(ml,l)), fsm.L(s,ml)); 
+                    Fuj_USol(u,j) = sum((s,mj)$(uout(u,s) and jin(mj,j)), fsm.L(s,mj)); 
+                    Flu_USol(l,u) = sum((sl,mu)$(lout(l,sl) and uin(mu,u)), fsm.L(sl,mu));
+                    Fll_USol(l,la) = sum((sl,ml)$(lout(l,sl) and lin(ml,la)), fsm.L(sl,ml));
+                    Flj_USol(l,j)= sum((sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj));   
+                    
+                );
+            else
+                Report_mul(itermul,'Objval_local')= +INF;     
+            );
+        );
+        #------------step 1.3: 统计结果重新排序(冒泡）---------
+        loop(itermul_b$(ord(itermul_b) <= (card(sol)-1)),#一共执行N-1轮迭代
+            loop(sol_$(ord(sol_) <= (card(sol) - ord(itermul_b))),
+                if(Objvalcou(sol_) > Objvalcou(sol_+1),#两两交换，从前到后执行,小的放前面,第itermul轮，执行N-itermul次
+                    Aul = Objvalcou(sol_);
+                    Objvalcou(sol_) = Objvalcou(sol_+1);
+                    Objvalcou(sol_+1) = Aul;
+                    Aul = Freq(sol_);
+                    Freq(sol_) = Freq(sol_+1);
+                    Freq(sol_+1) = Aul;
+                );
+            );
+        );
+        #display "======================================step 1: Result display =====================================";
+        #display sol, Objvalcou, Freq;#这块得加个冒泡排序，而且发现个规律，越接近全局最优解的，出现的频数越高，证明了方法的有效性！！！就是该方法很大概率发现近最优解
+        #display 'Current solutions:',UB, Fsm_USol, Fuc_USol, Puccin_USol, Puccout_USol, Fl_USol, Plcout_USol, Fj_USol, Pjc_USol, Fucc_delta;
+        #display Fru_USol, Fuu_USol, Ful_USol, Fuj_USol, Flu_USol, Fll_USol, Flj_USol;
+        #display puccout.UP,puccout.LO,Puccout_USol, plcout.UP, plcout.LO,Plcout_USol;
+        Report(case,'Mul_timeuse') = timeExec-Time_start_1;
+    );
+    #如果找到可行解，也输出
+    if(Gap > Gap_Tol and UB<+INF,
+        #display '============================================================================================================================';
+        display 'the feasible soution is found!';
+        display 'Feasible solutions:',UB, Fsm_USol, Fuc_USol, Puccin_USol, Puccout_USol, Fl_USol, Plcout_USol, Fj_USol, Pjc_USol, Fucc_delta;
+        display Fru_USol, Fuu_USol, Ful_USol, Fuj_USol, Flu_USol, Fll_USol, Flj_USol;
+        #display puccout.UP,puccout.LO,Puccout_USol, plcout.UP, plcout.LO,Plcout_USol;
+        #display '=============================================================================================================================';
+        #display  Npmr_U;
+        TWN.optfile = 0;#还原
+        #putclose bbcontrol 'mipstopexpr resusd >= 10000000';#还原
+        #WTN_RP_PN_Abt.optfile = 0;#还原
+    );
+
+    Time_start_2 = timeExec;
+
+
+
+
+
+    #============Result log===========
+    Report(case,'ObjVal') = UB;
+    Report(case,'Total time') = timeExec-Time_start_1;
+    Report(case,'Gap') = Gap;    
+    Report(case,'NumEqu') = TWN.numEqu;
+    Report(case,'NumVar') = TWN.numVar;
+    Report(case,'NumDVar') = TWN.numDVar;
+    Report(case,'Solving Time') = TWN.ResUsd;
+    Report(case,'NumR') = card(r);
+    Report(case,'NumU') = card(u);
+    Report(case,'NumL') = card(l);
+    Report(case,'NumUC') = card(uc);
+    Report(case,'NumUF') = card(uf);
+    Report(case,'NumC') = card(c);
+    
+    #清理参数和变量当前值和边界设定 避免影响下个算例的计算
+    option
+*        clear = sol
+*        clear = Objvalcou
+*        clear = Freq
+        clear = fsm
+        clear = puccout
+        clear = plcout
+        #clear = UB
+        clear = Fsm_USol
+        clear = Fl_USol
+        clear = Plcout_USol
+        clear = Fuc_USol
+        clear = Puccin_USol
+        clear = Puccout_USol
+        clear = Fj_USol
+        clear = Pjc_USol
+        clear = Fru_USol
+        clear = Fuu_USol
+        clear = Ful_USol
+        clear = Fuj_USol
+        clear = Flu_USol
+        clear = Fll_USol
+        clear = Flj_USol
+    ;
+);
+*======================Step 1: solving the case model===========
+#
+display Report_mul;
+display Report;
+**--------Export to Excel using GDX utilities---------
+*execute_unload "0614TWN_Conopt.gdx" Report Objvalcou, Freq
+*execute 'gdxxrw.exe 0614TWN_Conopt.gdx o=0614TWN_Conopt.xlsx Par=Report   rng=ReportSheet!'
+*execute 'gdxxrw.exe 0614TWN_Conopt.gdx o=0614TWN_Conopt.xlsx Par=Objvalcou   rng=ReportSheet2!'
+*execute 'gdxxrw.exe 0614TWN_Conopt.gdx o=0614TWN_Conopt.xlsx Par=Freq   rng=ReportSheet3!'

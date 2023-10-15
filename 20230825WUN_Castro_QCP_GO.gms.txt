@@ -1,0 +1,1982 @@
+$Title  WUN_models
+$ontext
+*--- 用水网络最优化设计模型：
+*--- 案例数据取自Castro 2007等
+*--- WUN Problem默认采用P formulation，
+*--- 基于洞察超结构给定变量初始边界
+*--- 基于随机多起点NLP局部优化获得高质量可行解
+*--- 算法写完后，记得将普通的WUN和广义问题分开
+*--- 不同算例的已知最优解, BL项数
+
+--更新日志：
+    7月20日：重新整理代码，基于asm的集合
+    7月21日：多起点搜索停止规则简化，给一个最大迭代次数即可
+    7月22日：完成了GO算法主体第第二三步，还需要考虑初始化方法交互(没必要），二元变量自适应松弛以及第四步的自适应边界紧缩
+    7月23日：添加了Dicopt在gap很小时，切换为模式2，固定初始拓扑结构为松弛问题解的过程；多起点搜索和初始化交互都是可选择的，并不是必须项
+            p12约束改进and asm(s_,ma_) and asm(sa_,m_)
+            #测试了下二元变量的适应性松弛，效果不好，增加了迭代伦次，和分割变量数，求解时间反而大幅增加，这与原问题中管线解的稀疏性有关，所以没必要松弛
+            #还需要考虑的只剩下原问题解初始化松弛问题以及边界紧缩
+    7月24日：代码完善，加入求解时间约束，和一次切换dicopt模式，搞定了紧缩框架
+    7月25日：初步搞定了边界紧缩的核心部分，以及基于稳健消减策略的执行部分，边界消减策略可以采用激进的策略，未写代码（暂不考虑）
+               1区间消减可能性要同时考虑上下界解所在区间无法消减(已搞定)
+               2边界消减问题没必要求到最优解！（待搞定）
+               3紧缩上下界优先的选择
+               4进入Abt的条件(已搞定)
+               5离开Abt的条件(已搞定)
+            紧缩策略：先紧缩区间数多的，然后中途发现一个变量最远侧区间无法紧缩，则直接跳出紧缩过程（一个折中的紧缩方案）
+            报告：每一轮次总的消减区间数
+    7月26日：搞定了稳健的Abt执行，改进Abt问题的求解终止条件（不必求到最优）
+            Debug:左侧紧缩时，第一个区间是1不是NU
+    7月27日： 更新边界紧缩的执行策略
+            如果是全部都走一遍，还是有可能出现很多次的无法紧缩，所以在紧缩一步，如果发现一个变量无法紧缩，直接跳出紧缩过程，而不是执行下一个变量。
+            改为只紧缩远端的区间，这样效率更高，即使这轮不紧缩近端，下轮就会紧缩另一侧了，减少无效的紧缩执行
+            1 执行变量的顺序不变，还是分割区间数多，偏差大
+            2 只紧缩远端的子区间，如果无法紧缩则直接结束abt
+            3 只对分割区间数大于限定值的变量进行紧缩
+           目前看，这个Abt效率是最高的，不再更改Abt策略了，并且发现动态分割效率已经非常搞了，abt其实用处不大。
+           完成了Abt过程的代码，进行了debug
+    8月14日： 加入Abt过程动态边界更新部分和二元变量推导存在性：
+            基于分支流fsm基于两侧浓度边界更新边界和逻辑推导yl
+    8月15日： 加入abt紧缩后动态边界更新部分和二元变量推导存在性：
+            基于分支流fsm基于两侧浓度边界更新边界和逻辑推导yl
+    8月20日： 单独建立了CastroWUN_QCP模型，更正了考虑循环结构的FL流率上界为Kloop+1
+    8月22日： 单独建立了WUN——QCP问题的GO模型
+    8月23日： 更严格的分支流率边界（水流率和杂质流率边界同时考虑）
+    8月24日： Bugfix----Fuf-uf边界修正
+    ObjVal
+Ex1     86.83333334
+Ex2     74.46991597
+Ex3     143.4125902
+Ex4     123.9285715
+Ex5     197.6900586
+Ex6     142.0815636
+Ex7     280.7711641
+Ex8     164.4897747
+Ex9     312.9215404
+Ex10    169.1173467
+Ex11    104.8949015
+Ex12    165.1952764
+Ex13    178.2628657
+Ex14    329.5698393
+Ex15    361.5176584
+Ex16    285.9343238
+Ex17    157.0944358
+Ex18    238.7333333
+Ex19    74.46991597
+Ex20    403.1959604
+Ex21    216.3701511
+Ex22    323.5051042
+Ex23    365.7836054
+Ex24    511.5267109
+Ex25    410.6353986
+Ex26    797.9771369
+Ex27    556.6751568
+Ex28    1812.170327
+Ex29    1285.005889
+Ex30    744.0833799
+Ex31    681.4104707
+Ex32    638.7167515
+Ex33    565.6075164
+Ex34    583.5215143
+Ex35    783.9509655
+Ex36    662.8070274
+$offtext
+$eolcom #
+*==============================================================================
+Option solprint = on ;
+Option sysout   = off ;
+option MIP      = Gurobi;#Gurobi, Odhcplex, Cplex
+option MIQCP    = Dicopt;#Gurobi, Baron, Dicopt
+option NLP      = Conopt;#Conopt, Baron
+option QCP      = Conopt;#Gurobi, Baron, Conopt
+option MINLP    = Baron;# Gurobi, Baron, Conopt, Convert, Dicopt
+option Optcr    = 1E-3;    # eps_{OPT TOL} = 1 * 10^-3
+option Reslim   = 3600;# 1 hour time limit
+option Decimals = 3;
+option Threads  = 8;
+option bratio = 1;#不使用初始点作为求解器的基
+*==========================代码块==============================================
+$onEcho > WUN_models.gms
+*========================Part 1: Abstract model ================================================
+*Sets, Parameters, variablbes and equations declared on total Set
+#========================Part 1: Abstract model ================================================
+*Sets, Parameters, variablbes and equations declared on total set
+*Problem Topology
+Sets
+    case 'case index'
+    r_   'Fresh water sources' 
+    u_   'Water using units'
+    j_   'discharge sinks(virtual)'
+    c_   'Components'
+    s_   'Splitters'
+    m_   'Mixers'
+;
+Sets
+    r(r_)  'Instance of fresh water sources'  
+    u(u_)  'Instance of water using units'
+    j(j_)  'Instance of discharge sinks(virtual)'
+    uc(u_) 'Instance of water using units of UC type'
+    uf(u_) 'Instance of water using units of UF type'
+    c(c_)  'Instance of components'
+    s(s_)  'Instance of splitters'
+    sr(s_) 'Instance of splitters at the outlet of fresh water sources'
+    sc(s_) 'Instance of splitters at the outlet of water using units of UC type'
+    sf(s_) 'Instance of splitters at the outlet of water using units of UF type'
+    m(m_)  'Instance of mixers'
+    mc(m_) 'Instance of mixers at the inlet of water using units of UC type'
+    mf(m_) 'Instance of mixers at the inlet of water using units of UF type'
+    mj(m_) 'Instance of mixers at the inlet of discharge sink j'
+;   
+Sets
+    rout(r_,s_)  'Allowable connection between r and s'  
+    uout(u_,s_)  'Allowable connection between u and s'  
+    uin(m_,u_)   'Allowable connection between m and u'
+    jin(m_,j_)   'Allowable connection between m and j'
+    asm(s_,m_)   'Allowable connection from s to m'
+    ssm(s_,m_)   'self-cycle connection from s to m for the same unit'
+;
+alias (u,ua),(uc,uca),(uf,ufa),(sc,sca),(sf,sfa),(c,ca)
+;
+#==============================================================================
+Parameters     
+    Prc(r_,c_)       'Concentration of component c of r, 10^3 ppm'
+    PucinU(u_,c_)    'Upper bound of concentration of component c at the inlet of u, 10^3 ppm'
+    PuccoutU(u_,c_)  'Upper bound of concentration of component c at the inlet of uc, 10^3 ppm'
+    FucU(u_)         'Upper bound of flowrate of total flow of uc, t/h'
+    Fucc_delta(u_,c_)      'Transferred load of flowrate of component flow c of uc from process stream, kg/h'
+    Fufin(u_)        'Flowrate of total flow at the inlet of uf, t/h'
+    Fufout(u_)       'Flowrate of total flow at the outlet of uf, t/h'
+    Pufcout(u_,c_)   'Concentration of component c at the outlet of uf, 10^3 ppm'
+;
+
+Parameters #辅助参数声明
+    Yunitselfrecycled  'is self-cylce allowable for process branch stream'
+    Objval_USol      'objective value, t/h'
+    Fuc_LP_Sol(u_)   'LP: Flowrate of total flow in Targeting Model of water usign unit uc, t/h'
+    Fsm_USol(s_,m_)  'Flowrate of total flow from splitter s to mixer m, t/h'
+    Fu_USol(u_)      'Flowrate of total flow  of water usign unit u, t/h'
+    Fucc_delta_LP_Sol(u_,c_) 'LP: Transferred load in Targeting Model of flowrate of component flow c of uc from process stream, kg/h'
+    Pucin_USol(u_,c_)
+    Pucout_USol(u_,c_)
+    Pjc_USol(j_,c_)
+    Fru_USol(r_,u_)
+    Fuu_USol(u_,u_)
+    Fuj_USol(u_,m_)
+    Report(*,*)       'Report'
+    Report_mul(*,*)
+;  
+#=======================================================================
+Positive Variables
+    fsm(s_,m_)       'Flowrate of total flow from splitter s to mixer m, t/h'
+    puccout(u_,c_)   'Concentration of component c at the outlet of unit uc, 10^3 ppm'
+    #Variables used only for MC model
+    fsmc(s_,m_,c_)   'Flowrate of component flow c from splitter sc to mixer m, kg/h'
+#=======================================================================
+Variable  objval;
+Equations
+    p1_objfun
+    p2(m_,u_,s_)
+    p3(m_,u_)
+    p4(u_,s_)
+    p5(m_,u_,s_,c_)
+    p5_MC(m_,u_,s_,c_)
+    p6(m_,u_)
+    p7(m_,u_)
+    p8(m_,u_,c_)
+    p8_MC(m_,u_,c_)
+    p9(m_,u_,c_)
+    p9_MC(m_,u_,c_)
+    fsmc_MC1(u_,s_,m_,c_)
+    fsmc_MC2(u_,s_,m_,c_)
+    fsmc_MC3(u_,s_,m_,c_)
+    fsmc_MC4(u_,s_,m_,c_)
+;
+    #objective function: sum of total flowrate of fresh water
+    p1_objfun..                                 objval =e= sum((sr,m_)$(m(m_) and not mj(m_)), fsm(sr,m_));
+    #mass balance of total flow at uc 
+    p2(mc,uc,sc)$(uin(mc,uc) and uout(uc,sc))..
+                                               sum(s, fsm(s,mc)) =e= sum(m, fsm(sc,m));
+    #mass balance of total flow at the inlet of uf 
+    p3(mf,uf)$uin(mf,uf)..                     sum(s, fsm(s,mf)) =e= Fufin(uf);
+    #mass balance of total flow at the outlet of uf 
+    p4(uf,sf)$uout(uf,sf)..                    Fufout(uf) =e= sum(m, fsm(sf,m));
+    #mass balance of component flow c at uc 
+    p5(mc,uc,sc,c)$(uin(mc,uc) and uout(uc,sc))..
+                                               sum((r,sr)$rout(r,sr), fsm(sr,mc)*Prc(r,c)) +
+                                               sum((uf,sf)$uout(uf,sf), fsm(sf,mc)*Pufcout(uf,c)) +
+                                               sum((uca,sca)$uout(uca,sca), fsm(sca,mc)*puccout(uca,c)) +
+                                               Fucc_delta(uc,c)
+                                               =e=
+                                               puccout(uc,c)*sum(m, fsm(sc,m));
+    
+    #upper bound  of total flow at the inlet of uc 
+    p6(mc,uc)$uin(mc,uc)..                     sum(s, fsm(s,mc)) =l= FucU(uc);
+    #lower bound  of total flow at the inlet of uc 
+    p7(mc,uc)$uin(mc,uc)..                     sum(s, fsm(s,mc)) =g=
+                                               smax(c, Fucc_delta(uc,c)/(puccout.Up(uc,c) - smin(r, Prc(r,c))));
+                                               
+    #upper bound  of component flow c at the inlet of u
+    p8(m,u,c)$uin(m,u)..
+                                               sum((r,sr)$rout(r,sr),   fsm(sr,m)*Prc(r,c)) +
+                                               sum((uf,sf)$uout(uf,sf), fsm(sf,m)*Pufcout(uf,c)) +
+                                               sum((uc,sc)$uout(uc,sc), fsm(sc,m)*puccout(uc,c))
+                                               =l=
+                                               PucinU(u,c)*sum(s, fsm(s,m));
+    
+                                               
+    #lower bound  of component flow c at the inlet of u
+    p9(m,u,c)$uin(m,u)..
+                                               sum((r,sr)$rout(r,sr),   fsm(sr,m)*Prc(r,c)) +
+                                               sum((uf,sf)$uout(uf,sf), fsm(sf,m)*Pufcout(uf,c)) +
+                                               sum((uc,sc)$uout(uc,sc), fsm(sc,m)*puccout(uc,c))
+                                               =g=
+                                               max(smin(r, Prc(r,c)) - 1E-6, 0)*sum(s, fsm(s,m));
+                                            
+    #mass balance of component flow c at uc in MC                                           
+    p5_MC(mc,uc,sc,c)$(uin(mc,uc) and uout(uc,sc))..
+                                               sum((r,sr)$rout(r,sr), fsm(sr,mc)*Prc(r,c)) +
+                                               sum((uf,sf)$uout(uf,sf), fsm(sf,mc)*Pufcout(uf,c)) +
+                                               sum(sca, fsmc(sca,mc,c)) +
+                                               Fucc_delta(uc,c)
+                                               =e=
+                                               sum(m, fsmc(sc,m,c));
+    #upper bound  of component flow c at the inlet of u in MC
+    p8_MC(m,u,c)$uin(m,u)..
+                                               sum((r,sr)$rout(r,sr),   fsm(sr,m)*Prc(r,c)) +
+                                               sum((uf,sf)$uout(uf,sf), fsm(sf,m)*Pufcout(uf,c)) +
+                                               sum(sc, fsmc(sc,m,c))
+                                               =l=
+                                               PucinU(u,c)*sum(s, fsm(s,m));
+    p9_MC(m,u,c)$uin(m,u)..
+                                               sum((r,sr)$rout(r,sr),   fsm(sr,m)*Prc(r,c)) +
+                                               sum((uf,sf)$uout(uf,sf), fsm(sf,m)*Pufcout(uf,c)) +
+                                               sum(sc, fsmc(sc,m,c))
+                                               =g=
+                                               max(smin(r, Prc(r,c)) - 1E-6, 0)*sum(s, fsm(s,m));
+                                               
+    
+    
+    #========================Mc envelope for relaxed variables(#8)=========
+    #fsmc(s_,m_,c_)   'Flowrate of component flow c from splitter sc to mixer m, kg/h'
+    fsmc_MC1(uc,sc,m,c)$uout(uc,sc)..          fsmc(sc,m,c) =g= puccout.Up(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.Up(sc,m) -
+                                                                puccout.Up(uc,c)*fsm.Up(sc,m);
+    fsmc_MC2(uc,sc,m,c)$uout(uc,sc)..          fsmc(sc,m,c) =g= puccout.Lo(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.Lo(sc,m) -
+                                                                puccout.Lo(uc,c)*fsm.Lo(sc,m);
+    fsmc_MC3(uc,sc,m,c)$uout(uc,sc)..          fsmc(sc,m,c) =l= puccout.Up(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.Lo(sc,m) -
+                                                                puccout.Up(uc,c)*fsm.Lo(sc,m);
+    fsmc_MC4(uc,sc,m,c)$uout(uc,sc)..          fsmc(sc,m,c) =l= puccout.Lo(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.Up(sc,m) -
+                                                                puccout.Lo(uc,c)*fsm.Up(sc,m);     
+#====================================PMR Model(nf4r_formula)=====================================
+Set npmr 'PMR 分割区间数总集合' /1*1000/;
+Set uc_c_npmr(u_,c_,npmr) '不同puccout对应的分割区间数';
+Parameters PuccoutnUp_pmr(u_,c_,npmr) '子区间浓度上界', PuccoutnLo_pmr(u_,c_,npmr) '子区间浓度下界';
+Positive variables fsmcn_pmr_d(s_,m_,c_,npmr) '凸包重构后fsm(sc,m)对应于puccout(uc,c,npmr)的分解变量, 一定要引入下标c, 因为不同杂质对应的npmr是也就是(c,npmr)是独立，激活的npmr是不相关的';
+Binary Variables ypuccout_pmr(u_,c_,npmr) 'puccout是否落在浓度子区间 npmr 的二元变量';
+Equations
+    eqbipuccout_pmr1(u_,c_)                   
+    eqpuccoutU_pmr2a(u_,c_)                     
+    eqpuccoutL_pmr2b(u_,c_)                      
+    eqsumt_pmr3a(u_,s_,m_,c_)                         
+    eqfsmcnU_pmr3b(u_,s_,m_,c_,npmr)                  
+    eqfsmcnL_pmr3c(u_,s_,m_,c_,npmr)                     
+    fsmc_pmr4a(u_,s_,m_,c_)                             
+    fsmc_pmr4b(u_,s_,m_,c_)                         
+    fsmc_pmr4c(u_,s_,m_,c_)                                 
+    fsmc_pmr4d(u_,s_,m_,c_)
+;
+
+    eqbipuccout_pmr1(uc,c)..                        sum(npmr$uc_c_npmr(uc,c,npmr), ypuccout_pmr(uc,c,npmr)) =e= 1;
+    eqpuccoutU_pmr2a(uc,c)..                        puccout(uc,c) =l= sum(npmr$uc_c_npmr(uc,c,npmr), PuccoutnUp_pmr(uc,c,npmr)*ypuccout_pmr(uc,c,npmr));
+    eqpuccoutL_pmr2b(uc,c)..                        puccout(uc,c) =g= sum(npmr$uc_c_npmr(uc,c,npmr), PuccoutnLo_pmr(uc,c,npmr)*ypuccout_pmr(uc,c,npmr));  
+    eqsumt_pmr3a(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    sum(npmr$uc_c_npmr(uc,c,npmr), fsmcn_pmr_d(sc,m,c,npmr)) =e= fsm(sc,m);        
+    eqfsmcnU_pmr3b(uc,sc,m,c,npmr)$(uout(uc,sc) and asm(sc,m) and uc_c_npmr(uc,c,npmr))..
+                                                    fsmcn_pmr_d(sc,m,c,npmr) =l= fsm.Up(sc,m)*ypuccout_pmr(uc,c,npmr);
+    eqfsmcnL_pmr3c(uc,sc,m,c,npmr)$(uout(uc,sc) and asm(sc,m) and uc_c_npmr(uc,c,npmr))..
+                                                    fsmcn_pmr_d(sc,m,c,npmr) =g= fsm.Lo(sc,m)*ypuccout_pmr(uc,c,npmr);
+    fsmc_pmr4a(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    fsmc(sc,m,c) =g= sum(npmr$uc_c_npmr(uc,c,npmr), puccoutnUp_pmr(uc,c,npmr)*fsmcn_pmr_d(sc,m,c,npmr)) + fsm.Up(sc,m)*puccout(uc,c) - sum(npmr$uc_c_npmr(uc,c,npmr), puccoutnUp_pmr(uc,c,npmr)*fsm.Up(sc,m)*ypuccout_pmr(uc,c,npmr));                                 
+    fsmc_pmr4b(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    fsmc(sc,m,c) =g= sum(npmr$uc_c_npmr(uc,c,npmr), puccoutnLo_pmr(uc,c,npmr)*fsmcn_pmr_d(sc,m,c,npmr)) + fsm.Lo(sc,m)*puccout(uc,c) - sum(npmr$uc_c_npmr(uc,c,npmr), puccoutnLo_pmr(uc,c,npmr)*fsm.Lo(sc,m)*ypuccout_pmr(uc,c,npmr));                                 
+    fsmc_pmr4c(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    fsmc(sc,m,c) =l= sum(npmr$uc_c_npmr(uc,c,npmr), puccoutnUp_pmr(uc,c,npmr)*fsmcn_pmr_d(sc,m,c,npmr)) + fsm.Lo(sc,m)*puccout(uc,c) - sum(npmr$uc_c_npmr(uc,c,npmr), puccoutnUp_pmr(uc,c,npmr)*fsm.Lo(sc,m)*ypuccout_pmr(uc,c,npmr));                                 
+    fsmc_pmr4d(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    fsmc(sc,m,c) =l= sum(npmr$uc_c_npmr(uc,c,npmr), puccoutnLo_pmr(uc,c,npmr)*fsmcn_pmr_d(sc,m,c,npmr)) + fsm.Up(sc,m)*puccout(uc,c) - sum(npmr$uc_c_npmr(uc,c,npmr), puccoutnLo_pmr(uc,c,npmr)*fsm.Up(sc,m)*ypuccout_pmr(uc,c,npmr));                                                                                                                                         
+$offecho
+$include WUN_models
+
+Model WUN/
+    p1_objfun     
+    p2       
+    p3
+    p4
+    p5
+    p6
+    p7
+    p8
+    p9
+    /;
+Model WUN_RP_P1/
+    p1_objfun     
+    p2       
+    p3
+    p4
+    p5_MC
+    p6
+    p7
+    p8_MC
+    p9_MC
+    fsmc_MC1
+    fsmc_MC2
+    fsmc_MC3
+    fsmc_MC4
+    /;
+Model WUN_RP_PN/
+    p1_objfun     
+    p2       
+    p3
+    p4
+    p5_MC
+    p6
+    p7
+    p8_MC
+    p9_MC
+    eqbipuccout_pmr1                  
+    eqpuccoutU_pmr2a                    
+    eqpuccoutL_pmr2b                     
+    eqsumt_pmr3a                       
+    eqfsmcnU_pmr3b                  
+    eqfsmcnL_pmr3c                    
+    fsmc_pmr4a                             
+    fsmc_pmr4b                         
+    fsmc_pmr4c                                
+    fsmc_pmr4d
+    /;
+Model WUN_RP_PN_Abt/
+    p1_objfun     
+    p2       
+    p3
+    p4
+    p5_MC
+    p6
+    p7
+    p8_MC
+    p9_MC
+    eqbipuccout_pmr1                  
+    eqpuccoutU_pmr2a                    
+    eqpuccoutL_pmr2b                     
+    eqsumt_pmr3a                       
+    eqfsmcnU_pmr3b                  
+    eqfsmcnL_pmr3c                    
+    fsmc_pmr4a                             
+    fsmc_pmr4b                         
+    fsmc_pmr4c                                
+    fsmc_pmr4d
+    /;
+$onecho > Data_input.gms
+* ==================================Part 2: Data import======================
+*Sets
+*    case 'case index'
+*    r_   'Fresh water sources' 
+*    u_   'Water using units'                   
+*    c_   'Components'
+*    s_   'Splitters'
+*    m_   'Mixers';
+* This part includes set and data definition,also include bounds of Variables definition
+Sets
+    case /Ex1*Ex38/
+    r_   /1*10/  
+    u_   /1*20/
+    j_   /1/
+    c_   /1*10/     
+    s_   /1*30/      
+    m_   /1*21/
+;
+*Problem Parameters of all cases
+Table Prc_all(case,r_,c_)
+                1       2       3       4       5       6
+    Ex1.1       0       0
+    Ex2.1       2       0       6       5
+    Ex2.2       3       4       0       3
+    Ex2.3       4       5       2       1
+    Ex3.1       10      0       4       3
+    Ex3.2       0       2       0       1
+    Ex4.1       0       0
+    Ex5.1       0       25
+    Ex5.2       50      0
+    Ex6.1       4       5       0       8       0
+    Ex6.2       4       6       2       7       2
+    Ex6.3       0       6       4       5       2
+    Ex6.4       3       2       1       0       6
+    Ex7.1       4       5       0       8       0       4    
+    Ex7.2       4       6       2       7       2       0   
+    Ex7.3       0       6       4       5       2       1
+    Ex8.1       5       0       0       2
+    Ex8.2       0       2       3       2
+    Ex8.3       0       4       0       3
+    Ex9.1       4       5       0       8       0       4    
+    Ex9.2       4       6       2       7       2       0
+    Ex10.1      0       0       0
+    Ex10.2      0       0       0
+    Ex11.1      2       0       6       5
+    Ex11.2      3       2       0       3
+    Ex11.3      4       5       2       1
+    Ex11.4      0       2       1       3
+    Ex12.1      5       0       
+    Ex12.2      4       2
+    Ex12.3      2       3
+    Ex13.1      0       0       3       1  
+    Ex13.2      0       3       0       1  
+    Ex13.3      3       0       0       1
+    Ex14.1      0       25      2       4       0       2
+    Ex14.2      15      0       0       9       3       0
+    Ex15.1      0       25      2       4       0       2
+    Ex15.2      15      0       0       9       3       0
+    Ex16.1      1       5       0       2       
+    Ex16.2      4       4       2       0       
+    Ex16.3      1       4       4       5
+    Ex17.1      3       0       2
+    Ex17.2      0       2       2
+    Ex17.3      2       4       0
+    Ex18.1      0       3       0       0   
+    Ex18.2      2       1       0       0   
+    Ex18.3      0       0       1       3
+    Ex19.1      2       0       6       5
+    Ex19.2      3       4       0       3
+    Ex19.3      4       5       2       1
+    Ex20.1      5       8       2       7       0
+    Ex20.2      8       2       8       6       9
+    Ex20.3      0       5       7       9       3
+    Ex20.4      2       2       9       6       2
+    Ex21.1      0       0       4       6       6       9
+    Ex21.2      4       9       5       8       3       8
+    Ex21.3      4       8       4       2       7       2
+    Ex21.4      0       7       5       4       1       10
+    Ex22.1      1       2       2       5       2       10
+    Ex22.2      6       2       2       3       6       0
+    Ex22.3      4       8       6       3       2       1
+    Ex22.4      7       9       5       1       1       0
+    Ex22.5      6       9       2       1       6       4
+    Ex23.1      4       5       0       8       0       4
+    Ex23.2      4       6       2       7       2       0
+    Ex23.3      0       6       4       5       1       1
+    Ex23.4      4       0       2       7       2       0
+    Ex23.5      2       6       2       5       3       1
+    Ex24.1      4       5       0       8       0       4
+    Ex24.2      4       6       2       7       2       0
+    Ex24.3      0       6       4       5       1       1
+    Ex24.4      4       0       2       7       2       0
+    Ex25.1      4       5       9
+    Ex25.2      7       8       1
+    Ex25.3      7       3       1
+    Ex25.4      6       4       9
+    Ex26.1      3       5       0       8       0       4
+    Ex26.2      4       6       2       0       2       0
+    Ex26.3      0       3       2       7       0       2
+    Ex26.4      4       1       2       3       2       8
+    Ex27.1      2       9       8       1
+    Ex27.2      7       6       4       6
+    Ex27.3      7       9       7       1
+    Ex27.4      7       9       5       1
+    Ex27.5      6       9       2       1
+    Ex28.1      3       5       0       8       0       4
+    Ex28.2      4       6       2       0       2       0
+    Ex28.3      0       3       2       7       0       2
+    Ex28.4      4       1       2       3       2       8
+    Ex29.1      3       5       0       8       3       0
+    Ex29.2      0       3       2       7       5       0
+    Ex29.3      4       1       2       3       4       0
+    Ex30.1      4       9       4       1       7       7
+    Ex30.2      7       5       5       5       8       10
+    Ex30.3      2       3       2       6       10      0
+    Ex30.4      6       9       8       0       9       5
+    Ex30.5      4       0       0       6       0       4
+    Ex31.1      4       9       4       1       7       7
+    Ex31.2      7       5       5       5       8       10
+    Ex31.3      2       3       2       6       10      0
+    Ex31.4      6       9       8       0       9       5
+    Ex31.5      4       0       0       6       0       4
+    Ex32.1      2       9       8       1
+    Ex32.2      7       6       4       6
+    Ex32.3      7       9       7       1
+    Ex33.1      2       9       8       1
+    Ex33.2      7       6       4       6
+    Ex33.3      7       9       7       1
+    Ex34.1      2       9       8       1
+    Ex34.2      7       6       4       6
+    Ex34.3      7       9       7       1
+    Ex34.4      6       9       8       0
+    Ex34.5      4       0       0       6
+    Ex34.6      8       5       6       9
+    Ex35.1      2       9       8       1       0
+    Ex35.2      7       6       4       6       3
+    Ex35.3      7       9       7       1       0  
+    Ex35.4      6       9       8       0       4
+    Ex36.1      3       3       8       8       4
+    Ex36.2      8       9       10      2       4
+    Ex36.3      10      0       3       9       8
+    Ex37.1      0       0       0       0       0
+    Ex38.1      0       0       0       0       0
+;
+#               1       2       3       4       5       6 
+Table PucinU_all(case,u_,c_)
+                1       2       3       4       5       6   
+    Ex1.1       20      60
+    Ex1.2       50      20 #这个我修改过
+    Ex1.3       100     150
+    Ex1.4       200     80
+    Ex2.1       12      54      17      34
+    Ex2.2       32      12      17      56
+    Ex2.3       10      8       34      39
+    Ex2.4       15      23      20      27
+    Ex3.1       13      78      34      178
+    Ex3.2       35      27      78      9
+    Ex3.3       200     90      98      876
+    Ex3.4       240     15      123     500
+    Ex4.1       0       10      
+    Ex4.2       50      75      
+    Ex4.3       50      120     
+    Ex4.4       400     40
+    Ex4.5       150     20
+    Ex4.6       300     55
+    Ex5.1       0       30      
+    Ex5.2       50      75      
+    Ex5.3       50      20      
+    Ex5.4       400     40
+    Ex5.5       20      55
+    Ex5.6       100     0
+    Ex5.7       200     60
+    Ex6.1       45      52      189     33      210
+    Ex6.2       20      30      70      12234   98
+    Ex6.3       142     420     200     13      637
+    Ex6.4       20      25      15      25      454
+    Ex6.5       350     2345    260     21      278
+    Ex7.1       45      52      189     33      210     24     
+    Ex7.2       120     30      30      12234   98      656 
+    Ex7.3       142     420     200     13      637     24   
+    Ex7.4       20      25      15      25      454     256  
+    Ex7.5       350     48      260     21      278     12
+    Ex8.1       0       7       0       12
+    Ex8.2       20      300     45      34
+    Ex8.3       120     20      200     56
+    Ex8.4       23      43      15      123
+    Ex8.5       90      400     60      57
+    Ex9.1       45      52      189     33      210     24   
+    Ex9.2       120     30      30      12234   98      656
+    Ex9.3       142     420     200     13      637     24 
+    Ex9.4       20      25      15      25      454     256  
+    Ex9.5       350     48      260     21      278     12
+    Ex9.6       20      50      100     30      70      20
+    Ex10.1      20      60      10      
+    Ex10.2      50      20      100 
+    Ex10.3      100     150     25  
+    Ex10.4      200     80      120
+    Ex11.1      326     842     733     214
+    Ex11.2      751     963     337     762
+    Ex11.3      837     695     991     180
+    Ex11.4      137     728     687     508
+    Ex12.1      13      78      
+    Ex12.2      35      27      
+    Ex12.3      60      50      
+    Ex12.4      240     15
+    Ex13.1      112     54      12      134
+    Ex13.2      32      12      47      56
+    Ex13.3      10      80      54      39
+    Ex13.4      45      93      70      177
+    Ex13.5      200     40      30      80
+    Ex13.6      300     55      80      120
+    Ex14.1      112     54      12      134     12      30
+    Ex14.2      32      12      47      56      40      100
+    Ex14.3      10      80      54      39      80      60
+    Ex14.4      45      93      70      177     20      20      
+    Ex14.5      200     40      30      80      30      100
+    Ex14.6      300     55      80      120     60      90
+    Ex14.7      20      25      100     20      40      45
+    Ex15.1      112     54      12      134     12      30
+    Ex15.2      32      12      47      56      40      100
+    Ex15.3      10      80      54      39      80      60
+    Ex15.4      45      93      70      177     20      20
+    Ex15.5      200     40      30      80      30      100
+    Ex15.6      300     55      80      120     60      90
+    Ex15.7      20      25      100     20      40      45
+    Ex16.1      45      52      189     33      
+    Ex16.2      120     30      30      120     
+    Ex16.3      142     420     200     13      
+    Ex16.4      20      25      15      25      
+    Ex16.5      350     48      260     21
+    Ex17.1      30      37      10      
+    Ex17.2      20      300     45      
+    Ex17.3      120     20      200     
+    Ex17.4      23      43      15      
+    Ex17.5      90      400     160
+    Ex18.1      20      30      20      10  
+    Ex18.2      50      20      20      20  
+    Ex18.3      100     150     30      20  
+    Ex18.4      200     80      20      60
+    Ex19.1      12      54      17      34
+    Ex19.2      32      12      17      56
+    Ex19.3      10      8       34      39
+    Ex19.4      15      23      20      27
+    Ex20.1      343     370     458     272     206
+    Ex20.2      271     499     37      265     211
+    Ex20.3      284     450     168     25      43
+    Ex20.4      427     52      26      171     306
+    Ex20.5      299     308     279     471     104
+    Ex20.6      57      483     173     255     179
+    Ex20.7      337     320     74      30      316
+    Ex20.8      488     360     47      367     301
+    Ex20.9      112     483     170     422     290
+    Ex21.1      325     202     27      274     614     710
+    Ex21.2      104     589     685     519     329     312
+    Ex21.3      218     578     455     496     24      291
+    Ex21.4      263     24      827     24      920     856
+    Ex21.5      669     163     177     885     435     457
+    Ex21.6      97      660     143     679     317     617
+    Ex22.1      65      465     166     56      33      346
+    Ex22.2      448     414     268     191     350     243
+    Ex22.3      171     496     406     486     323     355
+    Ex22.4      139     211     469     65      259     328
+    Ex22.5      319     303     229     296     13      454
+    Ex22.6      43      342     232     265     393     299
+    Ex22.7      452     64      10      334     143     244
+    Ex23.1      45      52      189     33      210     24
+    Ex23.2      120     30      30      12234   98      656
+    Ex23.3      142     420     200     13      637     24
+    Ex23.4      20      25      15      25      454     256
+    Ex23.5      350     48      260     21      278     12
+    Ex23.6      43      342     232     265     393     299
+    Ex23.7      452     64      10      334     143     244
+    Ex24.1      45      52      189     33      210     24
+    Ex24.2      120     30      30      12234   98      656
+    Ex24.3      142     420     200     13      637     24
+    Ex24.4      20      25      15      25      454     256
+    Ex24.5      350     48      260     21      278     12
+    Ex24.6      43      342     232     265     393     299
+    Ex24.7      452     64      10      334     143     244
+    Ex25.1      857     479     781
+    Ex25.2      71      990     998
+    Ex25.3      650     759     54
+    Ex25.4      905     120     452
+    Ex25.5      366     169     169
+    Ex25.6      242     652     92
+    Ex25.7      618     134     744
+    Ex26.1      45      52      189     33      210     24
+    Ex26.2      120     30      30      12234   98      656
+    Ex26.3      142     420     200     13      637     24
+    Ex26.4      20      25      15      25      454     256
+    Ex26.5      350     48      260     21      278     12
+    Ex26.6      20      50      100     30      70      20
+    Ex26.7      45      52      189     33      210     24
+    Ex26.8      120     30      30      12234   98      656
+    Ex26.9      142     420     200     13      637     24
+    Ex26.10     20      25      15      25      454     256
+    Ex26.11     350     48      260     21      278     12
+    Ex26.12     20      50      100     30      70      20
+    Ex27.1      2250    575     203     1393
+    Ex27.2      298     2353    364     2396
+    Ex27.3      883     1292    2398    862
+    Ex27.4      1257    2354    327     341
+    Ex27.5      1680    2476    2105    1092
+    Ex27.6      1759    301     139     1354
+    Ex27.7      58      2025    511     124
+    Ex27.8      2084    538     537     225
+    Ex27.9      427     2087    1759    482
+    Ex27.10     2086    1863    2195    396
+    Ex27.11     2012    994     1923    2076
+    Ex27.12     647     557     1675    2330
+    Ex27.13     1898    527     381     1257
+    Ex27.14     1718    858     323     191
+    Ex27.15     1661    1366    413     1546
+    Ex27.16     1243    639     2078    249
+    Ex28.1      45      52      189     33      210     24
+    Ex28.2      120     30      30      12234   98      656
+    Ex28.3      142     420     200     13      637     24
+    Ex28.4      20      25      15      25      454     256
+    Ex28.5      350     48      260     21      278     12
+    Ex28.6      20      50      100     30      70      20
+    Ex28.7      45      52      189     33      210     24
+    Ex28.8      120     30      30      12234   98      656
+    Ex28.9      142     420     200     13      637     24
+    Ex28.10     20      25      15      25      454     256
+    Ex28.11     350     48      260     21      278     12
+    Ex28.12     20      50      100     30      70      20
+    Ex28.13     350     48      260     21      278     12
+    Ex28.14     20      50      100     30      70      20
+    Ex28.15     45      52      189     33      210     24
+    Ex28.16     120     30      30      12234   98      656
+    Ex28.17     142     420     200     13      637     24
+    Ex28.18     20      25      15      25      454     256
+    Ex28.19     350     48      260     21      278     12
+    Ex28.20     20      50      100     30      70      20
+    Ex29.1      45      52      189     33      210     24
+    Ex29.2      120     30      30      12234   98      656
+    Ex29.3      142     420     200     13      637     24
+    Ex29.4      20      25      15      25      454     256
+    Ex29.5      350     48      260     21      278     12
+    Ex29.6      20      50      100     30      70      20
+    Ex29.7      45      52      189     33      210     24
+    Ex29.8      120     30      30      12234   98      656
+    Ex29.9      142     420     200     13      637     24
+    Ex29.10     20      25      15      25      454     256
+    Ex29.11     350     48      260     21      278     12
+    Ex29.12     20      50      100     30      70      20
+    Ex29.13     350     48      260     21      278     12
+    Ex29.14     20      50      100     30      70      20
+    Ex29.15     45      52      189     33      210     24
+    Ex29.16     120     30      30      12234   98      656
+    Ex29.17     142     420     200     13      637     24
+    Ex29.18     20      25      15      25      454     256
+    Ex29.19     350     48      260     21      278     12
+    Ex29.20     20      50      100     30      70      20
+    Ex30.1      1587    381     1903    2202    1281    1998
+    Ex30.2      381     1566    637     1833    899     1956
+    Ex30.3      2037    2324    2233    1157    1815    793
+    Ex30.4      803     2251    686     1021    2161    93
+    Ex30.5      2278    491     392     1237    2161    1004
+    Ex30.6      1863    1922    1219    801     538     589
+    Ex30.7      2491    1129    2300    1857    886     463
+    Ex30.8      292     2185    416     1366    1816    2426
+    Ex30.9      1784    2059    1866    1971    867     1365
+    Ex30.10     1612    2188    750     2110    46      1152
+    Ex30.11     1618    2242    633     440     593     2303
+    Ex30.12     673     1992    156     2262    1737    2230
+    Ex30.13     146     325     2127    2475    757     804
+    Ex30.14     453     658     1444    1445    1617    736
+    Ex30.15     962     2147    916     1620    1255    1972
+    Ex30.16     525     796     1587    2427    1999    672
+    Ex30.17     1515    2287    1249    1258    2243    1348
+    Ex30.18     357     1741    2148    2414    2215    580
+    Ex30.19     2339    112     1803    949     587     1819
+    Ex30.20     223     832     1789    308     726     2193
+    Ex31.1      1587    381     1903    2202    1281    1998
+    Ex31.2      381     1566    637     1833    899     1956
+    Ex31.3      2037    2324    2233    1157    1815    793
+    Ex31.4      803     2251    686     1021    2161    93
+    Ex31.5      2278    491     392     1237    2161    1004
+    Ex31.6      1863    1922    1219    801     538     589
+    Ex31.7      2491    1129    2300    1857    886     463
+    Ex31.8      292     2185    416     1366    1816    2426
+    Ex31.9      1784    2059    1866    1971    867     1365
+    Ex31.10     1612    2188    750     2110    46      1152
+    Ex31.11     1618    2242    633     440     593     2303
+    Ex31.12     673     1992    156     2262    1737    2230
+    Ex31.13     146     325     2127    2475    757     804
+    Ex31.14     453     658     1444    1445    1617    736
+    Ex31.15     962     2147    916     1620    1255    1972
+    Ex31.16     525     796     1587    2427    1999    672
+    Ex31.17     1515    2287    1249    1258    2243    1348
+    Ex31.18     357     1741    2148    2414    2215    580
+    Ex31.19     2339    112     1803    949     587     1819
+    Ex31.20     223     832     1789    308     726     2193
+    Ex32.1      2250    575     203     1393
+    Ex32.2      298     2353    364     2396
+    Ex32.3      883     1292    2398    862
+    Ex32.4      1257    2354    327     341
+    Ex32.5      1680    2476    2105    1092
+    Ex32.6      1759    301     139     1354
+    Ex32.7      58      2025    511     124
+    Ex32.8      2084    538     537     225
+    Ex32.9      427     2087    1759    482
+    Ex32.10     2086    1863    2195    396
+    Ex32.11     2012    994     1923    2076
+    Ex32.12     647     557     1675    2330
+    Ex32.13     1898    527     381     1257
+    Ex32.14     1718    858     323     191
+    Ex32.15     1661    1366    413     1546
+    Ex32.16     1243    639     2078    249
+    Ex32.17     363     223     307     93
+    Ex32.18     31      468     530     251
+    Ex32.19     850     451     628     531
+    Ex32.20     473     739     528     287
+    Ex33.1      2250    575     203     1393
+    Ex33.2      298     2353    364     2396
+    Ex33.3      883     1292    2398    862
+    Ex33.4      1257    2354    327     341
+    Ex33.5      1680    2476    2105    1092
+    Ex33.6      1759    301     139     1354
+    Ex33.7      58      2025    511     124
+    Ex33.8      2084    538     537     225
+    Ex33.9      427     2087    1759    482
+    Ex33.10     2086    1863    2195    396
+    Ex33.11     2012    994     1923    2076
+    Ex33.12     647     557     1675    2330
+    Ex33.13     1898    527     381     1257
+    Ex33.14     1718    858     323     191
+    Ex33.15     1661    1366    413     1546
+    Ex33.16     1243    639     2078    249
+    Ex34.1      2250    575     203     1393
+    Ex34.2      298     2353    364     2396
+    Ex34.3      883     1292    2398    862
+    Ex34.4      1257    2354    327     341
+    Ex34.5      1680    2476    2105    1092
+    Ex34.6      1759    301     139     1354
+    Ex34.7      58      2025    511     124
+    Ex34.8      2084    538     537     225
+    Ex34.9      427     2087    1759    482
+    Ex34.10     2086    1863    2195    396
+    Ex34.11     2012    994     1923    2076
+    Ex34.12     647     557     1675    2330
+    Ex34.13     1898    527     381     1257
+    Ex34.14     1718    858     323     191
+    Ex34.15     1661    1366    413     1546
+    Ex34.16     1243    639     2078    249
+    Ex35.1      201     1116    1004    1159    1447
+    Ex35.2      633     941     288     1499    270
+    Ex35.3      457     664     1380    242     456
+    Ex35.4      726     143     1232    1393    886
+    Ex35.5      698     1124    330     310     1486
+    Ex35.6      745     64      1421    474     9
+    Ex35.7      189     1498    1196    944     397
+    Ex35.8      190     871     114     1424    992
+    Ex35.9      279     1086    100     161     32
+    Ex35.10     1455    673     655     985     492
+    Ex35.11     663     329     934     902     341
+    Ex35.12     167     168     521     628     666
+    Ex35.13     166     1124    737     92      1407
+    Ex35.14     154     886     754     157     79
+    Ex35.15     194     366     552     672     817
+    Ex35.16     456     931     142     744     969
+    Ex36.1      279     532     86      952     178
+    Ex36.2      700     827     272     589     619
+    Ex36.3      400     460     710     514     590
+    Ex36.4      514     540     328     9       277
+    Ex36.5      85      541     227     825     111
+    Ex36.6      900     323     549     213     27
+    Ex36.7      805     871     101     377     512
+    Ex36.8      272     46      636     933     413
+    Ex36.9      233     279     760     516     178
+    Ex36.10     657     456     278     528     240
+    Ex36.11     15      543     276     426     432
+    Ex36.12     742     88      197     341     601
+    Ex36.13     938     947     249     954     509
+    Ex37.1      0       0       0
+    Ex37.2      20      300     45
+    Ex37.3      120     20      200
+    Ex38.1      0
+    Ex38.2      50
+    Ex38.3      50
+    Ex38.4      400  
+;
+#               1       2       3       4       5       6   
+Table PuccoutU_all(case,u_,c_) 
+                1       2       3       4       5       6
+    Ex1.1       50      120
+    Ex1.2       100     80
+    Ex1.3       150     300
+    Ex1.4       250     100
+    Ex2.1       35      120     56      87
+    Ex2.2       67      45      100     67
+    Ex2.3       67      26      67      50
+    Ex2.4       26      45      40      40
+    Ex3.1       55      129     67      450
+    Ex3.2       68      45      789     56
+    Ex3.3       250     167     278     1240
+    Ex3.4       344     200     269     679
+    Ex4.1       100     80      
+    Ex4.2       100     150      
+    Ex4.3       800     200     
+    Ex4.4       800     70
+    Ex4.5       200     65
+    Ex4.6       400     110
+    Ex5.1       100     80      
+    Ex5.2       100     150     
+    Ex5.3       800     200     
+    Ex5.4       800     70
+    Ex5.5       50      80
+    Ex5.6       150     45          
+    Ex5.7       250     200
+    Ex6.1       139     400     435     37      378
+    Ex6.2       245     125     85      14728   124
+    Ex6.3       222     459     567     56      768
+    Ex6.4       47      367     320     433     589
+    Ex6.5       850     3560    430     56      436
+    Ex7.1       139     400     435     37      378     124   
+    Ex7.2       245     125     85      14728   124     754
+    Ex7.3       222     459     567     56      768     58    
+    Ex7.4       47      367     320     433     589     467    
+    Ex7.5       850     3560    400     56      436     90
+    Ex8.1       15      400     35      40
+    Ex8.2       120     1250    180     67
+    Ex8.3       220     45      400     99
+    Ex8.4       50      60      30      134
+    Ex8.5       150     8000    120     234
+    Ex9.1       139     400     435     37      378     124  
+    Ex9.2       245     125     85      14728   124     754
+    Ex9.3       222     459     567     56      768     58
+    Ex9.4       47      367     320     433     589     467
+    Ex9.5       850     3560    400     56      436     90
+    Ex9.6       100     150     250     90      150     80
+    Ex10.1      50      120     40      
+    Ex10.2      100     80      200 
+    Ex10.3      150     300     70  
+    Ex10.4      250     100     1000
+    Ex11.1      873     950     956     557
+    Ex11.2      899     1011    690     989
+    Ex11.3      951     1013    1014    935
+    Ex11.4      623     904     846     611
+    Ex12.1      55      129     
+    Ex12.2      68      45      
+    Ex12.3      150     87      
+    Ex12.4      344     70
+    Ex13.1      212     100     67      234
+    Ex13.2      60      50      200     156
+    Ex13.3      90      180     100     90
+    Ex13.4      89      120     120     200
+    Ex13.5      400     70      60      100
+    Ex13.6      450     155     100     220
+    Ex14.1      200     90      50      234     45      80
+    Ex14.2      80      80      70      156     80      200
+    Ex14.3      100     110     90      139     130     90
+    Ex14.4      145     250     200     277     80      220     
+    Ex14.5      300     140     200     170     130     200
+    Ex14.6      400     155     180     220     110     190
+    Ex14.7      90      100     300     220     80      115
+    Ex15.1      200     90      50      234     45      80
+    Ex15.2      80      80      70      156     80      200
+    Ex15.3      100     110     90      139     130     90
+    Ex15.4      145     250     200     277     80      220
+    Ex15.5      300     140     200     170     130     200
+    Ex15.6      400     155     180     220     110     190
+    Ex15.7      90      100     300     220     80      115
+    Ex16.1      139     400     435     37      
+    Ex16.2      245     125     85      140     
+    Ex16.3      222     459     567     56      
+    Ex16.4      47      367     320     433     
+    Ex16.5      550     560     400     56
+    Ex17.1      115     80      35      
+    Ex17.2      120     1250    180     
+    Ex17.3      220     45      400     
+    Ex17.4      50      60      30      
+    Ex17.5      150     800     220
+    Ex18.1      50      60      30      40  
+    Ex18.2      70      70      45      60  
+    Ex18.3      200     250     80      60  
+    Ex18.4      250     180     90      90
+    Ex19.1      35      120     56      87
+    Ex19.2      67      45      100     67
+    Ex19.3      67      26      67      50
+    Ex19.4      26      45      40      40
+    Ex20.1      380     479     486     309     332
+    Ex20.2      299     500     73      507     226
+    Ex20.3      445     465     312     437     480
+    Ex20.4      476     520     87      482     391
+    Ex20.5      307     356     463     509     361
+    Ex20.6      149     491     318     514     356
+    Ex20.7      376     487     428     435     317
+    Ex20.8      499     411     323     395     454
+    Ex20.9      218     515     352     433     399
+    Ex21.1      661     303     976     536     752     993
+    Ex21.2      416     1005    763     978     449     473
+    Ex21.3      322     876     762     540     748     759
+    Ex21.4      469     133     936     310     965     938
+    Ex21.5      972     519     467     978     464     730
+    Ex21.6      347     872     457     767     754     828
+    Ex22.1      264     482     363     242     509     419
+    Ex22.2      515     457     345     399     400     379
+    Ex22.3      387     512     456     501     499     417
+    Ex22.4      275     349     504     225     268     502
+    Ex22.5      421     316     391     352     461     489
+    Ex22.6      112     429     505     266     481     505
+    Ex22.7      491     476     197     493     399     495
+    Ex23.1      139     400     435     37      378     124
+    Ex23.2      245     125     85      14728   124     754
+    Ex23.3      222     459     567     56      768     58
+    Ex23.4      47      367     320     433     589     467
+    Ex23.5      850     3560    400     56      436     90
+    Ex23.6      112     429     505     266     481     505
+    Ex23.7      491     476     197     493     399     495
+    Ex24.1      139     400     435     37      378     124
+    Ex24.2      245     125     85      14728   124     754
+    Ex24.3      222     459     567     56      768     58
+    Ex24.4      47      367     320     433     589     467
+    Ex24.5      850     3560    400     56      436     90
+    Ex24.6      112     429     505     266     481     505
+    Ex24.7      491     476     197     493     399     495
+    Ex25.1      870     540     798
+    Ex25.2      658     1176    1010
+    Ex25.3      1173    922     557
+    Ex25.4      1031    781     743
+    Ex25.5      1192    210     1073
+    Ex25.6      809     899     985
+    Ex25.7      1052    229     783
+    Ex26.1      139     400     435     37      378     124
+    Ex26.2      245     125     85      14728   124     754
+    Ex26.3      222     459     567     56      768     58
+    Ex26.4      47      367     320     433     589     467
+    Ex26.5      850     3560    400     56      436     90
+    Ex26.6      100     150     250     90      150     80
+    Ex26.7      68      90      230     33      410     150
+    Ex26.8      170     130     100     22234   198     1000
+    Ex26.9      342     720     400     40      767     700
+    Ex26.10     320     60      100     55      1000    800
+    Ex26.11     1000    110     360     60      678     50
+    Ex26.12     120     150     400     115     170     75
+    Ex27.1      2278    1665    1333    2093
+    Ex27.2      439     2755    935     2669
+    Ex27.3      2730    1823    2960    2369
+    Ex27.4      2664    2616    2706    2563
+    Ex27.5      2755    2722    2904    2952
+    Ex27.6      1855    869     1360    2739
+    Ex27.7      1216    2222    1225    2815
+    Ex27.8      2185    1836    1425    2821
+    Ex27.9      2704    2282    2753    716
+    Ex27.10     2504    2858    2823    2142
+    Ex27.11     2966    2563    2218    2127
+    Ex27.12     1446    1730    2830    2558
+    Ex27.13     2236    2292    1911    2001
+    Ex27.14     2808    1630    2281    1996
+    Ex27.15     1753    1716    890     1853
+    Ex27.16     1379    2352    2532    626
+    Ex28.1      139     400     435     37      378     124
+    Ex28.2      245     125     85      14728   124     754
+    Ex28.3      222     459     567     56      768     58
+    Ex28.4      47      367     320     433     589     467
+    Ex28.5      850     3560    400     56      436     90
+    Ex28.6      100     150     250     90      150     80
+    Ex28.7      68      90      230     33      410     150
+    Ex28.8      170     130     100     22234   198     1000
+    Ex28.9      342     720     400     40      767     700
+    Ex28.10     320     60      100     55      1000    800
+    Ex28.11     1000    110     360     60      678     50
+    Ex28.12     120     150     400     115     170     75
+    Ex28.13     850     3560    400     56      436     90
+    Ex28.14     100     150     250     90      150     80
+    Ex28.15     68      90      230     33      410     150
+    Ex28.16     170     130     100     22234   198     1000
+    Ex28.17     342     720     400     40      767     700
+    Ex28.18     320     60      100     55      1000    800
+    Ex28.19     1000    110     360     60      678     50
+    Ex28.20     120     150     400     115     170     75
+    Ex29.1      139     400     435     37      378     124
+    Ex29.2      245     125     85      14728   124     754
+    Ex29.3      222     459     567     56      768     58
+    Ex29.4      47      367     320     433     589     467
+    Ex29.5      850     3560    400     56      436     90
+    Ex29.6      100     150     250     90      150     80
+    Ex29.7      68      90      230     33      410     150
+    Ex29.8      170     130     100     22234   198     1000
+    Ex29.9      342     720     400     40      767     700
+    Ex29.10     320     60      100     55      1000    800
+    Ex29.11     1000    110     360     60      678     50
+    Ex29.12     120     150     400     115     170     75
+    Ex29.13     850     3560    400     56      436     90
+    Ex29.14     100     150     250     90      150     80
+    Ex29.15     68      90      230     33      410     150
+    Ex29.16     170     130     100     22234   198     1000
+    Ex29.17     342     720     400     40      767     700
+    Ex29.18     320     60      100     55      1000    800
+    Ex29.19     1000    110     360     60      678     50
+    Ex29.20     120     150     400     115     170     75
+    Ex30.1      2047    2428    2304    2641    2267    2679
+    Ex30.2      569     1638    1754    2336    1057    2567
+    Ex30.3      2130    2835    2267    2042    2629    1459
+    Ex30.4      2217    2289    1993    2643    2727    2034
+    Ex30.5      2573    2353    619     2872    2377    2524
+    Ex30.6      2681    2490    2851    897     1219    1306
+    Ex30.7      2705    1826    2649    2633    2070    904
+    Ex30.8      541     2200    2554    1849    2278    2816
+    Ex30.9      2714    2154    2920    2306    1896    1437
+    Ex30.10     2529    2207    823     2618    2110    2232
+    Ex30.11     2755    2761    1486    2426    866     2645
+    Ex30.12     2035    2802    1260    2367    1969    2320
+    Ex30.13     2675    334     2710    2557    2133    1732
+    Ex30.14     2084    1971    1448    1900    2072    2384
+    Ex30.15     2874    2902    1199    1832    1676    2336
+    Ex30.16     1574    2369    2418    2715    2639    2866
+    Ex30.17     1577    2946    1716    2689    2693    2307
+    Ex30.18     1842    2127    2354    2495    2700    2871
+    Ex30.19     2374    2911    2096    1303    2097    2335
+    Ex30.20     1267    1282    2572    2624    2533    2510
+    Ex31.1      2047    2428    2304    2641    2267    2679
+    Ex31.2      569     1638    1754    2336    1057    2567
+    Ex31.3      2130    2835    2267    2042    2629    1459
+    Ex31.4      2217    2289    1993    2643    2727    2034
+    Ex31.5      2573    2353    619     2872    2377    2524
+    Ex31.6      2681    2490    2851    897     1219    1306
+    Ex31.7      2705    1826    2649    2633    2070    904
+    Ex31.8      541     2200    2554    1849    2278    2816
+    Ex31.9      2714    2154    2920    2306    1896    1437
+    Ex31.10     2529    2207    823     2618    2110    2232
+    Ex31.11     2755    2761    1486    2426    866     2645
+    Ex31.12     2035    2802    1260    2367    1969    2320
+    Ex31.13     2675    334     2710    2557    2133    1732
+    Ex31.14     2084    1971    1448    1900    2072    2384
+    Ex31.15     2874    2902    1199    1832    1676    2336
+    Ex31.16     1574    2369    2418    2715    2639    2866
+    Ex31.17     1577    2946    1716    2689    2693    2307
+    Ex31.18     1842    2127    2354    2495    2700    2871
+    Ex31.19     2374    2911    2096    1303    2097    2335
+    Ex31.20     1267    1282    2572    2624    2533    2510
+    Ex32.1      2278    1665    1333    2093
+    Ex32.2      439     2755    935     2669
+    Ex32.3      2730    1823    2960    2369
+    Ex32.4      2664    2616    2706    2563
+    Ex32.5      2755    2722    2904    2952
+    Ex32.6      1855    869     1360    2739
+    Ex32.7      1216    2222    1225    2815
+    Ex32.8      2185    1836    1425    2821
+    Ex32.9      2704    2282    2753    716
+    Ex32.10     2504    2858    2823    2142
+    Ex32.11     2966    2563    2218    2127
+    Ex32.12     1446    1730    2830    2558
+    Ex32.13     2236    2292    1911    2001
+    Ex32.14     2808    1630    2281    1996
+    Ex32.15     1753    1716    890     1853
+    Ex32.16     1379    2352    2532    626
+    Ex32.17     984     710     398     631
+    Ex32.18     857     558     728     535
+    Ex32.19     923     651     1007    911
+    Ex32.20     837     974     636     508
+    Ex33.1      2278    1665    1333    2093
+    Ex33.2      439     2755    935     2669
+    Ex33.3      2730    1823    2960    2369
+    Ex33.4      2664    2616    2706    2563
+    Ex33.5      2755    2722    2904    2952
+    Ex33.6      1855    869     1360    2739
+    Ex33.7      1216    2222    1225    2815
+    Ex33.8      2185    1836    1425    2821
+    Ex33.9      2704    2282    2753    716
+    Ex33.10     2504    2858    2823    2142
+    Ex33.11     2966    2563    2218    2127
+    Ex33.12     1446    1730    2830    2558
+    Ex33.13     2236    2292    1911    2001
+    Ex33.14     2808    1630    2281    1996
+    Ex33.15     1753    1716    890     1853
+    Ex33.16     1379    2352    2532    626
+    Ex34.1      2278    1665    1333    2093
+    Ex34.2      439     2755    935     2669
+    Ex34.3      2730    1823    2960    2369
+    Ex34.4      2664    2616    2706    2563
+    Ex34.5      2755    2722    2904    2952
+    Ex34.6      1855    869     1360    2739
+    Ex34.7      1216    2222    1225    2815
+    Ex34.8      2185    1836    1425    2821
+    Ex34.9      2704    2282    2753    716
+    Ex34.10     2504    2858    2823    2142
+    Ex34.11     2966    2563    2218    2127
+    Ex34.12     1446    1730    2830    2558
+    Ex34.13     2236    2292    1911    2001
+    Ex34.14     2808    1630    2281    1996
+    Ex34.15     1753    1716    890     1853
+    Ex34.16     1379    2352    2532    626
+    Ex35.1      2911    2658    2518    2410    1744
+    Ex35.2      2834    951     1204    2743    1143
+    Ex35.3      916     2590    2737    682     1846
+    Ex35.4      2721    2710    2008    2429    2913
+    Ex35.5      2561    2367    967     2822    1956
+    Ex35.6      2634    589     2029    2654    1892
+    Ex35.7      266     2567    2426    2630    1795
+    Ex35.8      1043    1528    1816    2480    1076
+    Ex35.9      432     2794    1857    1611    2978
+    Ex35.10     1545    1402    1741    2569    1814
+    Ex35.11     2722    1896    1920    1487    3000
+    Ex35.12     930     2557    2415    2924    2616
+    Ex35.13     888     2218    2730    938     2515
+    Ex35.14     625     995     870     724     834
+    Ex35.15     587     691     796     836     923
+    Ex35.16     644     1003    667     920     984
+    Ex36.1      1067    646     270     1121    232
+    Ex36.2      1180    1185    398     1123    1042
+    Ex36.3      906     978     927     1098    1081
+    Ex36.4      1113    916     999     990     890
+    Ex36.5      1169    973     794     924     362
+    Ex36.6      1010    903     1089    655     203
+    Ex36.7      940     1181    420     945     628
+    Ex36.8      1197    609     1107    1057    620
+    Ex36.9      761     753     948     910     292
+    Ex36.10     893     849     947     613     440
+    Ex36.11     810     968     481     771     998
+    Ex36.12     757     545     785     689     986
+    Ex36.13     1016    953     473     971     620
+    Ex37.1      15      400     35
+    Ex37.2      120     12500   180
+    Ex37.3      220     45      9500
+    Ex38.1      100
+    Ex38.2      100
+    Ex38.3      800
+    Ex38.4      800  
+;
+#               1       2       3       4       5       6
+Table FucU_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10         
+    Ex1         23    47     123
+    Ex2         34    12     45     15
+    Ex3         23    47     123    34
+    Ex4         20    100    40     10
+    Ex5         20    100    40     10
+    Ex6         16    64     10     68     20
+    Ex7         64    34     126    28     120
+    Ex8         72    34     56     124    25
+    Ex9         64    34     126    28     100    55
+    Ex10        42    147    55
+    Ex11        34    12     45
+    Ex12        123   67     93     34
+    Ex13        80    60     60     10
+    Ex14        120   50     80     90
+    Ex15        120   50     80     90     40
+    Ex16        84    134    36     60
+    Ex17        72    64     56     24
+    Ex18        123   47     123
+    Ex19        34    12     45     15
+    Ex20        23    47     123    34
+    Ex21        20    100    40     10
+    Ex22        100   100    40     90
+    Ex23        64    34     126    28     120
+    Ex24        64    34     126    128
+    Ex25        54    174    226    68     100
+    Ex26        34    74     126    88     100    55     100    26     98     115
+    Ex27        134   74     26     88     100    55     50     26
+    Ex28        34    74     126    88     100    55     100    26     98     115
+    Ex29        134   74     26     88     100    55     50     26     98     115
+    Ex30        134   74     26     88     100    55     50     26     98     115
+    Ex31        134   74     26     88     100    55     50     26     98     115
+    Ex32        134   74     26     88     100    55     50     26     98     115
+    Ex33        134   74     26     88     100    55     50     26     98     115
+    Ex34        134   74     26     88     100    55     50     26     98     115
+    Ex35        34    74     26     38     70     55     50     26     98     95
+    Ex36        134   74     26     88     100    55     50     126    58
+    Ex37        45    34     56
+    Ex38        20    100    40     10 
+     +          11    12     13     14     15     16     17     18     19     20
+    Ex28        185   95     100    345    100    185    95     100    345    100
+    Ex29        85    95     100    45
+    Ex30        85    95     100    45     100
+    Ex31        85    95     100    45     100    75     95     100    120    70
+    Ex32        85    95     100    45     100    75     95     100    120    70
+    Ex33        85
+    Ex34        85    95     100
+    Ex35        85    95     100
+;
+#               1     2      3      4      5      6      7      8      9      10    
+Table Fufin_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10    
+    Ex1                             70
+    Ex4                                    35     25
+    Ex5                                    50     80     70
+    Ex10                            90
+    Ex11                            95
+    Ex13                                   35     45
+    Ex14                                   20     60     70
+    Ex15                                          30     100
+    Ex16                                   100
+    Ex17                                   65
+    Ex18                            170
+    Ex20                                   43     127    93     100    20
+    Ex21                                   35     125
+    Ex22                                   80     80     70
+    Ex23                                          68     70
+    Ex24                                   120    68     130
+    Ex25                                          95     50
+    Ex27                                                               98     75
+    Ex36                                                                      115
+     +          11    12     13     14     15     16     17     18     19     20
+    Ex26        185   95
+    Ex27        85    195    60     23     100    45
+    Ex29                                   100    185    95     100    75     80
+    Ex30                                          75     95     100    120    70
+    Ex33              195    60     23     100    45
+    Ex34                            45     100    75
+    Ex35                            85     100    75
+    Ex36        85    95     80                   
+;
+#               1     2      3      4      5      6      7      8      9      10  
+Table Fufout_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10    
+    Ex1                             60
+    Ex4                                    10     40
+    Ex5                                    50     70     60
+    Ex10                            40
+    Ex11                            50
+    Ex13                                   20     40
+    Ex14                                   30     70     40
+    Ex15                                          40     85
+    Ex16                                   80
+    Ex17                                   75
+    Ex18                            140
+    Ex20                                   63     87     50     90     40
+    Ex21                                   70     40
+    Ex22                                   30     100    90
+    Ex23                                          58     120
+    Ex24                                   80     58     120
+    Ex25                                          55     80
+    Ex27                                                               58     115
+    Ex36                                                                      75
+     +          11    12     13     14     15     16     17     18     19     20
+    Ex26        185   95
+    Ex27        85    200    40     45     120    75
+    Ex29                                   80     200    65     50     95     70
+    Ex30                                          90     58     200    75     90
+    Ex33              200    40     45     120    75
+    Ex34                            70     120    80
+    Ex35                            45     80     175
+    Ex36        95    100    70
+;
+#               1     2      3      4      5      6      7      8      9      10  
+$offecho
+$include Data_input
+#======================Step 0： 模型,数据和参数设置导入=====================
+WUN.solprint = 2;
+WUN_RP_PN.solprint = 2;
+WUN_RP_PN_Abt.solprint = 2;
+WUN_RP_PN_Abt.optfile = 2;#2对应的是模型的Abt属性文件，如果两个模型都使用1，则可能会造成一个属性文件包括不同的属性，会冲突
+
+*WUN.optfile = 1;
+*file opt /Gurobi.opt/;
+*putclose opt 'Nonconvex 2';
+#key parameters for GO control
+Scalar
+    YGOstep1 'implement step 1 in GO or not' /0/,#默认没必要用，除非要执行边界紧缩或者上下定界模型交互
+    YGOstep2_3 'implement step 2&3 in GO or not' /1/
+    YGOstep4 'implement step 4(abt) in GO or not'/0/
+    Gap 'current gap' /+Inf/, Gap_tol 'Gap tolerance' /1E-3/
+    Dynamic_factor 'added partitions adjust factor '/0.1/#越大每轮增加的分割变量越少，等于1相当于大于均值的, 目前看取中小规模取0.1是最佳的，大和特大规模问题则建议取1，其实影响并不大，都取1就好
+    Gap_rp_tol  'rel_gap for RP'/0/#默认RP求到最优解 误差为0
+    NitermulU 'round upper bound for multistart'/50/
+    NitergoU 'round upper bound for GO'/50/ #Step 2
+    Total_timeU '总求解时间上限,s' /3600/
+;
+    WUN_RP_PN.Reslim = 3600;#'RP求解时间上限,s'
+#--- Data Setting for GO (Step 1)---
+Set itermul 'multistart total rounds'/1*100/;
+Scalar Time_start_1,Time_start_2;
+#多起点停止辅助集合和参数
+Set sol_ /1*1000/;
+Set sol(sol_); sol(sol_) = no;
+Parameter
+    Objvalcou(sol_) '第sol局部解对应的目标值'
+    Freq(sol_)  '第sol局部解对应的出现次数'
+    Ysol_add  '判断是否增加了频数'
+;
+    Objvalcou(sol_) = 0;
+    Freq(sol_) = 0;  
+Set itermul_b '冒泡排序迭代轮次索引'/1*1000/;
+Scalar Aul '冒泡排序辅助参数';
+
+#--- Data Setting for GO (Step 2 and 3)---
+Sets
+    itergo 'iteration index for GO rounds'/1*100/
+    qpmr 'PMR 分割点数总集合' /1*1001/
+    uc_c_qpmr(u_,c_,qpmr) '不同puccout对应的分割点数'
+;
+Alias(qpmr_a, qpmr),(itergo_a,itergo);
+Scalar
+    LB 'current lower bound' /-1E+10/, UB 'current upper bound' /+1E+10/,
+    Epsilon_LB 'a small numeric value to avoid numeric problem'/1E-8/
+    Nd_dynamic 'added partitions per round'/1/
+    Ub_solve_switch_gap '切换原问题Dicopt求解方式的gap阈值' /1E-2/# 1%
+;
+Parameter
+    Report_go(itergo, *)
+    Npmr_U(u_,c_) 'PMR 分割区间数'
+    Puccoutq_pmr(u_,c_,qpmr) '分割点浓度值'
+    Fsmc_devi(s_,m_,c_) 'devation of fsmc in RP'
+    Pclout_BLsum_devi(u_,c_) 'total devation of fsmc in RP about pclout'
+    Pclout_BLsum_devi_Ave 'nonzero average of Pclout_BLsum_devi'
+    Npmr_LSol(u_,c_) '下定界模型RPypuccout_pmr(uc,c,npmr)解所在区间索引的值'
+    Puccout_LSol(u_,c_) '下定界模型Puccout(uc,c)解' 
+;
+#--- Data Setting for GO (Step 4)---
+Sets
+    uc_c_abt(u_,c_) 'candidate variables for abt'
+    iter_abt  '执行不同分割区间数对应的轮次，并不是总的分割变量轮次'/1*100/
+;
+Alias (uc,uc_b),(c,c_b),(npmr,npmr_a);#边界紧缩中使用的索引
+Scalar
+    NiterabtU 'round upper bound for abt'/50/
+    Lo_partitionNum '统计平均分割区间数的阈值(不包括)'/3/
+    Ave_partiions_to_step4 'average partitions for bigger than Lo_partitionNum to enter step 4'/5/
+    Total_partiions_to_step4  'total number of partitions for enter step 4'/100/
+    Count_bt 'Abt过程紧缩迭代更新的紧缩后子区间指针 1,2,...'
+    Interval 'Abt过程紧缩子区间指针'
+    Time_start_abt 'Abt起始时刻'#注意Abt是基于每轮itergo记录的总时长
+    Abt_Count '总紧缩求解次数' /0/
+    #Test, AAA , BBB, CCC "Npmr_U",DDD "Npmr_USol", EEE "Npmr_LSol", FFF "current abt variable"
+;
+Parameter
+    Npmr_USol(u_,c_) '当前上界解对应的松弛模型所在子区间RP ypuccout_pmr(uc,c,npmr)解所在区间索引的值'
+    Ypuccout_pmr_Bt(u_,c_,npmr) '紧缩后是否存在，如果还存在对应为1，否则为0'
+    Npmr_U_temp(u_,c_) 'PMR 分割区间数,暂存值'
+;
+File bbcontrol /Gurobi.op2/;
+
+#Parameters for bound update and tighting
+Parameters
+    PuccoutUp_temp(u_,c_) 'PuccoutUp暂存值'
+    PuccoutLo_temp(u_,c_)'PuccoutLo暂存值'
+    FsmUp_temp(s_,m_) 'FsmUp暂存值'
+    FsmLo_temp(s_,m_)'FsmLo暂存值'
+    PucinU_temp(u_,c_)
+    Caseindex '案例索引'
+;
+#loop(case$(ord(case)=30),
+#loop(case$(ord(case)=4 or ord(case)=5),
+#loop(case$(ord(case)>27 or ord(case)<37),
+#
+loop(case,
+    Caseindex = ord(case);
+    display '=================================================',Caseindex;
+    Yunitselfrecycled = 1;
+    LB =-1E+10; UB =+1E+10; 
+    # extract domains for current problem(optional)
+    # extract domains for current problem(optional)
+    #r(r_) =yes$( (ord(r_) = 1) );#test !!!!!
+    r(r_) =yes$( (ord(r_) = 1) or (ord(r_) > 1 and sum(c_$Prc_all(case,r_,c_), 1)));#注意要合在一起写
+    uc(u_) = FucU_all(case,u_);
+    uf(u_) = Fufin_all(case,u_);
+    u(u_) = uc(u_) + uf(u_); 
+    j(j_) = yes;
+    c(c_) = sum(u_$PucinU_all(case,u_,c_), 1);
+    s(s_) = yes$(ord(s_) <= (card(r) + card(u))); 
+    m(m_) = yes$(ord(m_) <= card(u)+1);  
+    sc(s_) = yes$(ord(s_) <= sum(u$FucU_all(case,u), 1));
+    sf(s_) = yes$((ord(s_) > sum(u$FucU_all(case,u), 1)) and (ord(s_) <= card(u)));
+    sr(s_) = yes$((ord(s_) > card(u)) and s(s_));
+    mc(m_) = yes$(m(m_) and ord(m_) <= card(uc));
+    mf(m_) = yes$(m(m_) and ord(m_) > card(uc) and ord(m_) < card(u)+1);
+    mj(m_) = yes$(m(m_) and ord(m_) = card(u)+1); 
+    #二维子集合指定映射关系
+    rout(r_,s_) =  yes$((ord(r_) = (ord(s_)- card(u))) and r(r_));
+    uout(u_,s_) =  yes$(u(u_) and (ord(u_) = ord(s_)));
+    uin (m_,u_) =  yes$(u(u_) and (ord(m_) = ord(u_)));
+    jin(m_,j_) =  yes$(j(j_) and mj(m_) and (ord(m_) = ord(j_)+ card(u)));
+    #display uc, uf, rout, jin;
+    #自循环过程流股集合
+    ssm(s_,m_) = yes$(((sc(s_) and mc(m_)) or (sf(s_) and mf(m_))) and (ord(s_)=ord(m_)));
+    #允许连接的流股集合(WUN不包括sr-mj)
+    asm(s_,m_)$((1-Yunitselfrecycled)) = yes$(s(s_) and m(m_) and (not ssm(s_,m_)) and not (sr(s_) and mj(m_))); 
+    asm(s_,m_)$(Yunitselfrecycled) = yes$(s(s_) and m(m_) and not (sr(s_) and mj(m_)));
+    #display ssm, asm;
+    # extract data
+    Prc(r,c) = Prc_all(case,r,c)*1E-3;#单位换算为10^3 ppm
+    #Prc(r,c) = 0;#单位换算为10^3 ppm
+    PucinU(u,c) = PucinU_all(case,u,c)*1E-3;
+    PuccoutU(uc,c) = PuccoutU_all(case,uc,c)*1E-3;
+    FucU(uc) = FucU_all(case,uc);
+    Fucc_delta(uc,c) = FucU(uc)*(PuccoutU(uc,c) - PucinU(uc,c));
+    Fufin(uf) = Fufin_all(case,uf);
+    Fufout(uf) = Fufout_all(case,uf);
+    Pufcout(uf,c) = PuccoutU_all(case,uf,c)*1E-3;
+    #display r, u, uc, uf, c, s, m, sc, sf, sr, mc, mf, mj, rout, uout, uin;
+    #display Prc, PucinU, PuccoutU, FucU, Fucc_delta, Fufin, Fufout, Pufcout;
+    #============ hard bound============
+    puccout.Up(uc,c) = PuccoutU(uc,c);
+    puccout.Lo(uc,c) = max(smin(r, Prc(r,c)) + Fucc_delta(uc,c)/FucU(uc) - 1E-6, 0);#避免数值问题
+    #fsm.Up(sr,mc) = sum(uc$uin(mc,uc), FucU(uc));
+    #fsm.Up(sr,mf) = sum(uf$uin(mf,uf), Fufin(uf));
+    #fsm.Up(sc,mf) = min(sum(uc$uout(uc,sc), FucU(uc)), sum(uf$uin(mf,uf), Fufin(uf)));
+    #fsm.Up(sc,mc) = min(sum(uca$uout(uca,sc), FucU(uca)), sum(uc$uin(mc,uc), FucU(uc)));
+    #fsm.Up(sf,mc) = min(sum(uf$uout(uf,sf), Fufout(uf)), sum(uc$uin(mc,uc), FucU(uc)));
+    #fsm.Up(sf,mf) = min(sum(ufa$uout(ufa,sf), Fufout(ufa)), sum(uf$uin(mf,uf), Fufin(uf)));
+    fsm.Up(sr,mc) = sum(uc$uin(mc,uc), FucU(uc)*min(smin(c$(max(PucinU(uc,c), sum(r$rout(r,sr), Prc(r,c)))>0), PucinU(uc,c)/max(PucinU(uc,c), sum(r$rout(r,sr), Prc(r,c)))), 1)); #可能出现一个c，PucIn和Prc同时为0导致分母为0，这种对应的值等于1
+    fsm.Up(sr,mf) = sum(uf$uin(mf,uf), Fufin(uf)*min(smin(c$(max(PucinU(uf,c), sum(r$rout(r,sr), Prc(r,c)))>0), PucinU(uf,c)/max(PucinU(uf,c), sum(r$rout(r,sr), Prc(r,c)))), 1));
+    fsm.Up(sc,mj) = sum(uc$uout(uc,sc), FucU(uc));
+    fsm.Up(sc,mf) = min(sum(uc$uout(uc,sc), FucU(uc)),
+                        sum(uf$uin(mf,uf), Fufin(uf)*smin(c, PucinU(uf,c)/max(PucinU(uf,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c)))))
+                    );       
+    fsm.Up(sc,mc) = min(sum(uca$uout(uca,sc), FucU(uca)),
+                        sum(uc$uin(mc,uc), FucU(uc)*smin(c, PucinU(uc,c)/max(PucinU(uc,c), sum(uca$uout(uca,sc), puccout.Lo(uca,c)))))
+                    );    
+    fsm.Up(sf,mj) = sum(uf$uout(uf,sf), Fufout(uf));
+    fsm.Up(sf,mc) = min(sum(uf$uout(uf,sf), Fufout(uf)),sum(uc$uin(mc,uc), FucU(uc)*smin(c, PucinU(uc,c)/max(PucinU(uc,c), sum(uf$uout(uf,sf), Pufcout(uf,c))))));  
+    fsm.Up(sf,mf) = min(sum(uf$uout(uf,sf), Fufout(uf)),sum(ufa$uin(mf,ufa), Fufin(ufa)*smin(c, PucinU(ufa,c)/max(PucinU(ufa,c), sum(uf$uout(uf,sf), Pufcout(uf,c))))));  
+    #
+    display fsm.UP, puccout.UP, puccout.LO;
+
+    #======================== Global optimization algorithm ================================
+    #---------------------------------------------------------------------------------------
+    #------------------------ GO-Step 1：multistart local optimization ---------------------
+    #---------------------------------------------------------------------------------------
+    Time_start_1 = timeExec;
+    if(YGOstep1,
+        loop(itermul$(ord(itermul)<=NitermulU),
+            puccout.L(uc,c) = uniform(puccout.Lo(uc,c), puccout.Up(uc,c));
+            fsm.L(s,m)$asm(s,m) = uniform(fsm.Lo(s,m), fsm.Up(s,m));
+            #WUN.solprint = 2;
+            Solve WUN using QCP minimizing objval;        
+            #Report_mul(itermul,'NLP_stat')= WUN.modelstat;
+            #Report_mul(itermul,'Solving_Time') = WUN.ResUsd;
+            if(WUN.modelstat = 1 or WUN.modelstat = 2 or WUN.modelstat = 7 or WUN.modelstat = 8,
+                Report_mul(itermul,'Objval_local')= objval.L;
+                #------------step 1.1:对局部解进行统计----
+                Ysol_add = 0;
+                loop(sol,
+                    if(abs(objval.L - Objvalcou(sol))<1E-3,#如果没发现新解
+                        Freq(sol) = Freq(sol) + 1;
+                        Ysol_add = 1;
+                    );
+                );
+                if(Ysol_add = 0, #如果发现新的局部解
+                    sol(sol_)$(ord(sol_) = (card(sol)+1)) = yes;
+                    Objvalcou(sol_)$(ord(sol_) = card(sol)) = objval.L;
+                    Freq(sol_)$(ord(sol_) = card(sol)) = 1; 
+                );
+                #display sol, Objvalcou, Freq;
+                
+                #------------step 1.2：更新最优解--------- 
+                if(objval.L < UB,#更新最优解
+                    UB = objval.L; 
+                    Fsm_USol(s,m) = fsm.L(s,m);   
+                    Fu_USol(uc) = sum((s,mc)$uin(mc,uc), fsm.L(s,mc));
+                    Fu_USol(uf) = Fufin(uf);
+                    #PucinU(u,c) = PucinU(u,c)*1E+3; #ppm
+                    Pucin_USol(uc,c)$(Fu_USol(uc)>0) = (puccout.UP(uc,c) - Fucc_delta(uc,c)/Fu_USol(uc))*1E+3; #ppm
+                    Pucin_USol(uf,c)$(Fufin(uf)>0) =  (sum((r,sr,mf)$(rout(r,sr) and uin(mf,uf)), fsm.L(sr,mf)*Prc(r,c)) +
+                                                       sum((ufa,sfa,mf)$(uout(ufa,sfa) and uin(mf,uf)), fsm.L(sfa,mf)*Pufcout(ufa,c)) +
+                                                       sum((uc,sc,mf)$(uout(uc,sc) and uin(mf,uf)), fsm.L(sc,mf)*puccout.UP(uc,c)))/Fufin(uf)*1E+3;#ppm
+                    Pucout_USol(uc,c)$(Fu_USol(uc)>0) = puccout.L(uc,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算 
+                    Pucout_USol(uf,c) = Pufcout(uf,c)*1E+3; 
+                    Pjc_USol(j,c) = (sum((uf,sf,mj)$(uout(uf,sf) and jin(mj,j)), fsm.L(sf,mj)*Pufcout(uf,c)) +
+                                     sum((uc,sc,mj)$(uout(uc,sc) and jin(mj,j)), fsm.L(sc,mj)*puccout.L(uc,c)))/sum((s,mj)$(jin(mj,j) and asm(s,mj)), fsm.L(s,mj))*1E+3;                     
+                    Fru_USol(r,u) = sum((sr,m)$(rout(r,sr) and uin(m,u)), fsm.L(sr,m)); 
+                    Fuu_USol(u,ua) = sum((s,m)$(uout(u,s) and uin(m,ua)), fsm.L(s,m)); 
+                    Fuj_USol(u,mj) = sum(s$(uout(u,s)), fsm.L(s,mj));                     
+                );
+            else
+                Report_mul(itermul,'Objval_local')= +INF;     
+            );
+            #变量当前值清理(赋值为默认值零,后续初始化基于LP模型的结果)
+            fsm.L(s_,m_) = 0;
+            puccout.L(u_,c_) = 0;
+        );
+        #------------step 1.3: 统计结果重新排序(冒泡）---------
+        loop(itermul_b$(ord(itermul_b) <= (card(sol)-1)),#一共执行N-1轮迭代
+            loop(sol_$(ord(sol_) <= (card(sol) - ord(itermul_b))),
+                if(Objvalcou(sol_) > Objvalcou(sol_+1),#两两交换，从前到后执行,小的放前面,第itermul轮，执行N-itermul次
+                    Aul = Objvalcou(sol_);
+                    Objvalcou(sol_) = Objvalcou(sol_+1);
+                    Objvalcou(sol_+1) = Aul;
+                    Aul = Freq(sol_);
+                    Freq(sol_) = Freq(sol_+1);
+                    Freq(sol_+1) = Aul;
+                );
+            );
+        );
+        #display "======================================step 1: Result display =====================================";
+        #display sol, Objvalcou, Freq;#这块得加个冒泡排序，而且发现个规律，越接近全局最优解的，出现的频数越高，证明了方法的有效性！！！就是该方法很大概率发现近最优解
+        #display 'Current solutions:',UB, Fsm_USol, Fru_USol, Fu_USol, Fuu_USol, Fuj_USol, Pucin_USol, Pucout_USol, Pjc_USol;
+        Report(case,'Mul_timeuse') = timeExec-Time_start_1;
+    );
+   
+    #求解非分割RP
+    #Solve WUN_RP_P1 using MIP minimizing objval;
+    #---全均匀分割---
+*    Npmr_U(uc,c) = 1;
+*    uc_c_npmr(uc,c,npmr) = yes$(ord(npmr) <= Npmr_U(uc,c));
+*    uc_c_qpmr(uc,c,qpmr) = yes$(ord(qpmr) <= (Npmr_U(uc,c)+1));
+*    Puccoutq_pmr(uc,c,qpmr)$uc_c_qpmr(uc,c,qpmr) = puccout.Lo(uc,c)+(puccout.Up(uc,c)-puccout.Lo(uc,c))/Npmr_U(uc,c)*(ord(qpmr) - 1);   
+*    PuccoutnUp_pmr(uc,c,npmr)$uc_c_npmr(uc,c,npmr) = sum(qpmr$(ord(qpmr) = (ord(npmr) + 1)), Puccoutq_pmr(uc,c,qpmr));
+*    PuccoutnLo_pmr(uc,c,npmr)$uc_c_npmr(uc,c,npmr) = sum(qpmr$(ord(qpmr) = ord(npmr)), Puccoutq_pmr(uc,c,qpmr));
+*    display uc_c_npmr, PuccoutnUp_pmr, PuccoutnLo_pmr; 
+*    Solve WUN_RP_PN using MIP minimizing objval;
+    Time_start_2 = timeExec;
+    if(YGOstep2_3,
+        #先基于当前UB解初始化RP,在基于LB解初始化P,不断迭代，暂时不考虑松弛原问题二元变量和边界紧缩部分---暂未执行
+        loop(itergo$(ord(itergo)<=NitergoU),
+        #---------------------------------------------------------------------------------------
+        #------------------------ GO-Step 2：solve RP, P and update results --------------------
+        #---------------------------------------------------------------------------------------
+            #---LBsolve&renew---
+            if(ord(itergo)=1, #Initialization
+                Npmr_U(uc,c) = 1; 
+                uc_c_npmr(uc,c,npmr) = yes$(ord(npmr) <= Npmr_U(uc,c));
+                uc_c_qpmr(uc,c,qpmr) = yes$(ord(qpmr) <= (Npmr_U(uc,c)+1));
+                Puccoutq_pmr(uc,c,'1') = puccout.Lo(uc,c);
+                Puccoutq_pmr(uc,c,'2') = puccout.Up(uc,c);   
+                PuccoutnUp_pmr(uc,c,npmr)$uc_c_npmr(uc,c,npmr) = sum(qpmr$(ord(qpmr) = (ord(npmr) + 1)), Puccoutq_pmr(uc,c,qpmr));
+                PuccoutnLo_pmr(uc,c,npmr)$uc_c_npmr(uc,c,npmr) = sum(qpmr$(ord(qpmr) = ord(npmr)), Puccoutq_pmr(uc,c,qpmr));    
+            );
+            #display uc_c_npmr, PuccoutnUp_pmr, PuccoutnLo_pmr;
+            WUN_RP_PN.optcr = Gap_rp_tol;
+            Solve WUN_RP_PN using MIP minimizing objval;
+            #如果松弛模型的求解时间超时，则跳过GO，只统计上轮的迭代结果即可
+            if(WUN_RP_PN.ResUsd>=WUN_RP_PN.Reslim, break;);
+            if((WUN_RP_PN.modelstat =1 or WUN_RP_PN.modelstat =8) and (objval.l >= (LB - Epsilon_LB )),
+                LB = objval.l;
+                #Npmr_LSol(uc,c) = sum(npmr$(ypuccout_pmr.L(uc,c,npmr)>Smallvalue and uc_c_npmr(uc,c,npmr)), ord(npmr));#这个有数值问题
+                Puccout_LSol(uc,c) = puccout.L(uc,c);
+                Npmr_LSol(uc,c) = sum(npmr$(PuccoutnUp_pmr(uc,c,npmr) >= Puccout_LSol(uc,c)
+                                           and PuccoutnLo_pmr(uc,c,npmr) <= Puccout_LSol(uc,c)
+                                           and uc_c_npmr(uc,c,npmr)), ord(npmr));
+            );
+            #display  Npmr_U,Npmr_LSol, ypuccout_pmr.L; 
+            #bi_pn.l(uc,c,npmr) = 0;#对于变量域变化的，先清零，否则影响后续的参数赋值
+            #---Calculate auxiliary parameters
+            Fsmc_devi(sc,m,c)$asm(sc,m) = abs(fsmc.L(sc,m,c) - sum(uc$uout(uc,sc), puccout.L(uc,c))*fsm.L(sc,m));
+            Pclout_BLsum_devi(uc,c) = sum((sc,m)$(asm(sc,m) and uout(uc,sc)), Fsmc_devi(sc,m,c));
+            Pclout_BLsum_devi_Ave = sum((uc,c), Pclout_BLsum_devi(uc,c))/sum((uc,c)$(Pclout_BLsum_devi(uc,c)>0), 1);
+            #display Fsmc_devi, Pclout_BLsum_devi, Pclout_BLsum_devi_Ave;
+           
+            #---UBsolve&renew---
+            Solve WUN using QCP minimizing objval;
+            if((WUN.modelstat = 1 or WUN.modelstat = 2 or WUN.modelstat = 7 or WUN.modelstat = 8) and (objval.L < UB),#更新最优解
+                UB = objval.L;
+                Fsm_USol(s,m) = fsm.L(s,m);   
+                Fu_USol(uc) = sum((s,mc)$uin(mc,uc), fsm.L(s,mc));
+                Fu_USol(uf) = Fufin(uf);
+                #PucinU(u,c) = PucinU(u,c)*1E+3; #ppm
+                Pucin_USol(uc,c)$(Fu_USol(uc)>0) = (puccout.UP(uc,c) - Fucc_delta(uc,c)/Fu_USol(uc))*1E+3; #ppm
+                Pucin_USol(uf,c)$(Fufin(uf)>0) =  (sum((r,sr,mf)$(rout(r,sr) and uin(mf,uf)), fsm.L(sr,mf)*Prc(r,c)) +
+                                                   sum((ufa,sfa,mf)$(uout(ufa,sfa) and uin(mf,uf)), fsm.L(sfa,mf)*Pufcout(ufa,c)) +
+                                                   sum((uc,sc,mf)$(uout(uc,sc) and uin(mf,uf)), fsm.L(sc,mf)*puccout.UP(uc,c)))/Fufin(uf)*1E+3;#ppm
+                Pucout_USol(uc,c)$(Fu_USol(uc)>0) = puccout.L(uc,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算 
+                Pucout_USol(uf,c) = Pufcout(uf,c)*1E+3; 
+                Pjc_USol(j,c) = (sum((uf,sf,mj)$(uout(uf,sf) and jin(mj,j)), fsm.L(sf,mj)*Pufcout(uf,c)) +
+                                 sum((uc,sc,mj)$(uout(uc,sc) and jin(mj,j)), fsm.L(sc,mj)*puccout.L(uc,c)))/sum((s,mj)$(jin(mj,j) and asm(s,mj)), fsm.L(s,mj))*1E+3;                     
+                Fru_USol(r,u) = sum((sr,m)$(rout(r,sr) and uin(m,u)), fsm.L(sr,m)); 
+                Fuu_USol(u,ua) = sum((s,m)$(uout(u,s) and uin(m,ua)), fsm.L(s,m)); 
+                Fuj_USol(u,mj) = sum(s$(uout(u,s)), fsm.L(s,mj));  
+            );
+            #更新上界解所在RP的子区间
+            Npmr_USol(uc,c) = sum(npmr$(PuccoutnUp_pmr(uc,c,npmr) >= Pucout_USol(uc,c)*1E-3 and PuccoutnLo_pmr(uc,c,npmr) <= Pucout_USol(uc,c)*1E-3 and uc_c_npmr(uc,c,npmr)), ord(npmr));
+            
+            #---Result and gap update and optimilaty check---
+            Gap=abs((UB-LB)/UB);
+            Report_go(itergo, 'LB') = LB;
+            Report_go(itergo, 'UB') = UB;
+            Report_go(itergo, 'Gap') = Gap;
+            Report_go(itergo, 'Partitions') = sum((uc,c), Npmr_U(uc,c));                                 
+            Report_go(itergo, 'Solving Time RP') = WUN_RP_PN.ResUsd;
+            Report_go(itergo, 'Solving Time P') = WUN.ResUsd;
+            Report_go(itergo, 'Solving Time Total P+RP') = sum(itergo_a$(ord(itergo_a)<=ord(itergo)),Report_go(itergo_a, 'Solving Time RP')+Report_go(itergo_a, 'Solving Time P'));
+            if(Gap <= Gap_Tol, #是否满足gap
+                Report_go(itergo, 'TotalTime234') = timeExec-Time_start_2;  
+                #display '============================================================================================================================'
+                display 'the optimal soution is found!';
+                display 'Global solutions:',UB, LB, Gap, Fsm_USol, Fru_USol, Fu_USol, Fuu_USol, Fuj_USol, Pucin_USol, Pucout_USol, Pjc_USol;
+                #display '=============================================================================================================================';
+                #display  Npmr_U;
+                WUN.optfile = 0;#还原
+                putclose bbcontrol 'mipstopexpr resusd >= 10000000';#还原
+                WUN_RP_PN_Abt.optfile = 0;#还原
+                break;#可以跳出多层循环
+            elseif timeExec-Time_start_1>Total_timeU,#最大求解时间达到
+                Report_go(itergo, 'TotalTime1234') = timeExec-Time_start_1;  
+                #display '============================================================================================================================';
+                display 'maximum total time is reached!';
+                #display  Npmr_U;
+                WUN.optfile = 0;#还原
+                putclose bbcontrol 'mipstopexpr resusd >= 10000000';#还原
+                WUN_RP_PN_Abt.optfile = 0;#还原
+                break;#可以跳出多层循环
+            );
+            
+
+            #---------------------------------------------------------------------------------------
+            #------------------------ GO-Step 4：Adaptive bounds contraction  ----------------------
+            #---------------------------------------------------------------------------------------
+            Time_start_abt = timeExec;
+            if(YGOstep4,
+                if(sum((uc_b,c_b)$(Npmr_U(uc_b,c_b)>Lo_partitionNum), Npmr_U(uc_b,c_b)) >= Ave_partiions_to_step4*sum((uc_b,c_b)$(Npmr_U(uc_b,c_b)>Lo_partitionNum), 1)
+                   and sum((uc_b,c_b)$(Npmr_U(uc_b,c_b)>Lo_partitionNum), 1) > 0 and (sum((uc_b,c_b), Npmr_U(uc_b,c_b)) >= Total_partiions_to_step4)
+                   #                   and ord(itergo) = 7
+                   ,
+                   #执行Abt的条件基于大于临近分割区间的区间数平均值以及总的分割区间数
+                    #每轮GO紧缩对应的UB是不变的,所以不用每次紧缩都更新，而是每轮GO
+                    putclose bbcontrol 'mipstopexpr objest > ' (round(Ub,5)+0.00001):0:5 ' || objval < ' (round(Ub,5)-0.00001):0:5;#圆整会出现舍去的情况，为保证参考值合理，额外加一个小值                   
+                    #display Npmr_U, Npmr_USol, Npmr_LSol, Puccoutq_pmr; 
+                    #------------ Step4-1 ---------------
+                    uc_c_abt(uc_b,c_b) = yes;#初始化候选紧缩的集合
+                    Npmr_U_temp(uc_b,c_b) = Npmr_U(uc_b,c_b);
+                    #display uc_c_abt; 
+                    #执行紧缩的变量为候选变量中分割区间数最大的,并且是其中偏差值最大的
+                    loop(iter_abt$(ord(iter_abt)<=NiterabtU),
+                        loop((uc_b,c_b)$(uc_c_abt(uc_b,c_b) and Npmr_U(uc_b,c_b) = smax(uc_c_abt(uca,ca), Npmr_U(uca,ca))
+                                        and Npmr_U(uc_b,c_b)>Lo_partitionNum),#限制紧缩的变量为：分割区间数大于限制值
+                            if(Pclout_BLsum_devi(uc_b,c_b) = smax(uc_c_abt(uca,ca)$(Npmr_U(uca,ca) = Npmr_U(uc_b,c_b)), Pclout_BLsum_devi(uca,ca)),
+                                # Step 4.1 ------ bound contraction implementation !!!!!(基于保守策略的紧缩方法)
+                                Ypuccout_pmr_Bt(uc_b,c_b,npmr)$uc_c_npmr(uc_b,c_b,npmr)=1;#由于可能进行多轮紧缩，所以需要先重置为1
+                                #基于RP解和P解位置判断先紧缩下边界还是上边界（看参考区间两侧的剩余区间数多少）
+                                #display Puccout_LSol,puccout.Up,puccout.Lo;
+                                #如果上下界解在整个紧缩区间两侧，则跳过该变量紧缩
+                                if(max(Npmr_USol(uc_b,c_b),Npmr_LSol(uc_b,c_b))-min(Npmr_USol(uc_b,c_b),Npmr_LSol(uc_b,c_b))+1 = Npmr_U(uc_b,c_b),
+                                    uc_c_abt(uc_b,c_b) = no;#此时的(uc_b,c_b)是确定的
+                                    #
+                                    display "========================================";
+                                    #
+                                    display uc_c_abt; 
+                                    #
+                                    display "skip the abt for this variable";
+                                    break;
+                                );
+                                #只紧缩远端子区间
+                                if((Npmr_U(uc_b,c_b)-max(Npmr_USol(uc_b,c_b),Npmr_LSol(uc_b,c_b)))
+                                   >=(min(Npmr_USol(uc_b,c_b),Npmr_LSol(uc_b,c_b))-1),
+                                    #display "========================================";
+                                    #display "Ub domain is tightened";                                   
+                                    for(Interval = Npmr_U(uc_b,c_b) downto (max(Npmr_USol(uc_b,c_b),Npmr_LSol(uc_b,c_b))+1) by 1,#是downto,不是to,先到二者较大的
+                                        ypuccout_pmr.fx(uc_b,c_b,npmr)$(ord(npmr)=Interval) = 1;#直接固定子区间为待消减的区间，不用更新边界
+                                        
+                                        #暂存边界值
+                                        PuccoutUp_temp(uc_b,c_b) = puccout.Up(uc_b,c_b); 
+                                        PuccoutLo_temp(uc_b,c_b) = puccout.Lo(uc_b,c_b);
+                                        FsmUp_temp(sc,mc)$(asm(sc,mc) and uout(uc_b,sc)) = fsm.Up(sc,mc);
+                                        FsmUp_temp(sc,mf)$(asm(sc,mf) and uout(uc_b,sc)) = fsm.Up(sc,mf);
+                                        FsmUp_temp(sc,mc)$(asm(sc,mc) and uin(mc,uc_b)) = fsm.Up(sc,mc);
+                                        PucinU_temp(uc_b,c_b) = PucinU(uc_b,c_b); 
+                                        #display "before update";  
+                                        #display puccout.Up, puccout.Lo, fsm.Up;
+                                        #增加对变量域的更新和更新相关其他变量的边界更新
+                                        puccout.Up(uc_b,c_b) = sum(npmr$(ord(npmr)=Interval), PuccoutnUp_pmr(uc_b,c_b,npmr));
+                                        puccout.Lo(uc_b,c_b) = sum(npmr$(ord(npmr)=Interval), PuccoutnLo_pmr(uc_b,c_b,npmr));
+                                        #更新fuc-uc/uf-ucout,fuc-uc-ucin
+                                        fsm.Up(sc,mc)$(asm(sc,mc) and uout(uc_b,sc))
+                                               = min(FucU(uc_b),
+                                                     sum(uc$uin(mc,uc), FucU(uc)*PucinU(uc,c_b)/max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b)) )
+                                                 );   #fucuc_UP-ucout
+                                        fsm.Up(sc,mf)$(asm(sc,mf) and uout(uc_b,sc))
+                                               = min(FucU(uc_b),
+                                                     sum(uf$uin(mf,uf), Fufin(uf)*PucinU(uf,c_b)/max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)) )
+                                                 );   #fucuf_UP-ucout
+                                        #更新fuc-uc-ucin (fr-u和fuf-u不参与BL项，无需更新)
+                                        PucinU(uc_b,c_b) = min(PucinU(uc_b,c_b), puccout.Up(uc_b,c_b) - Fucc_delta(uc_b,c_b)/FucU(uc_b));
+                                        fsm.Up(sc,mc)$(asm(sc,mc) and uin(mc,uc_b))
+                                               = min(sum(uc$uout(uc,sc), FucU(uc)),
+                                                     FucU(uc_b)*PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(uc$uout(uc,sc), puccout.Lo(uc,c_b)))
+                                                 );   #fucuc_UP-uin                                        
+                                        #display "after update";  
+                                        #display puccout.Up, puccout.Lo, fsm.Up;
+*                                        fsm.Up(sc,mf) = min(sum(uc$uout(uc,sc), FucU(uc)),
+*                                                            sum(uf$uin(mf,uf), Fufin(uf)*smin(c, PucinU(uf,c)/max(PucinU(uf,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c)))))
+*                                                        );       
+*                                        fsm.Up(sc,mc) = min(sum(uca$uout(uca,sc), FucU(uca)),
+*                                                            sum(uc$uin(mc,uc), FucU(uc)*smin(c, PucinU(uc,c)/max(PucinU(uc,c), sum(uca$uout(uca,sc), puccout.Lo(uca,c)))))
+*                                                        );                                                                                                              
+
+                                        Solve WUN_RP_PN_Abt using MIP minimizing objval;
+                                        Abt_Count = Abt_Count + 1;
+                                        
+                                        #还原变量边界避免影响其他问题(基于同样的变量)
+                                        puccout.Up(uc_b,c_b) = PuccoutUp_temp(uc_b,c_b); 
+                                        puccout.Lo(uc_b,c_b) = PuccoutLo_temp(uc_b,c_b);
+                                        fsm.Up(sc,mc)$(asm(sc,mc) and uout(uc_b,sc)) = FsmUp_temp(sc,mc);
+                                        fsm.Up(sc,mf)$(asm(sc,mf) and uout(uc_b,sc)) = FsmUp_temp(sc,mf);
+                                        fsm.Up(sc,mc)$(asm(sc,mc) and uin(mc,uc_b)) = FsmUp_temp(sc,mc);
+                                        PucinU(uc_b,c_b) = PucinU_temp(uc_b,c_b); 
+                                        #display "after restore";  
+                                        #display puccout.Up, puccout.Lo, fsm.Up;
+                                        #display Interval;
+                                        #display objval.L,WUN_RP_PN_Abt.objest;
+                                        #不论是提前终止还是正常求解结束，判断可紧缩的方法一致,都可以基于当前objest
+                                        if(WUN_RP_PN_Abt.objest > UB, Ypuccout_pmr_Bt(uc_b,c_b,npmr)$(ord(npmr)=Interval)=0; );#如果可紧缩记录下对应的区间值,继续执行紧缩                                         
+                                        #display Ypuccout_pmr_Bt;
+                                        ypuccout_pmr.Up(uc_b,c_b,npmr)$(ord(npmr)=Interval) = 1;#还原
+                                        ypuccout_pmr.Lo(uc_b,c_b,npmr)$(ord(npmr)=Interval) = 0;#还原
+                                        #提前终止Abt方法:如果待紧缩变量最远侧子区间无法消减(对于靠近下边界，最远侧是子区间Npmr_U)，则跳出边界紧缩过程，优先判断
+                                        break$(sum(npmr$(ord(npmr)=Interval and uc_c_npmr(uc_b,c_b,npmr) and ord(npmr)=Npmr_U(uc_b,c_b)), Ypuccout_pmr_Bt(uc_b,c_b,npmr))=1) 3;
+                                        #如果没实现子区间的紧缩,则跳出子区间紧缩
+                                        break$(sum(npmr$(ord(npmr)=Interval and uc_c_npmr(uc_b,c_b,npmr)), Ypuccout_pmr_Bt(uc_b,c_b,npmr))=1); 
+                                    );                                                                            
+                                else
+                                    #display "========================================";
+                                    #display "Lb domain is tightened";
+                                    for(Interval = 1 to (min(Npmr_USol(uc_b,c_b),Npmr_LSol(uc_b,c_b))-1) by 1,                                   
+                                        ypuccout_pmr.fx(uc_b,c_b,npmr)$(ord(npmr)=Interval) = 1;
+
+                                        #暂存边界值
+                                        PuccoutUp_temp(uc_b,c_b) = puccout.Up(uc_b,c_b); 
+                                        PuccoutLo_temp(uc_b,c_b) = puccout.Lo(uc_b,c_b);
+                                        FsmUp_temp(sc,mc)$(asm(sc,mc) and uout(uc_b,sc)) = fsm.Up(sc,mc);
+                                        FsmUp_temp(sc,mf)$(asm(sc,mf) and uout(uc_b,sc)) = fsm.Up(sc,mf);
+                                        FsmUp_temp(sc,mc)$(asm(sc,mc) and uin(mc,uc_b)) = fsm.Up(sc,mc);
+                                        PucinU_temp(uc_b,c_b) = PucinU(uc_b,c_b); 
+                                        #display "before update";                                          
+                                        #display puccout.Up, puccout.Lo, fsm.Up, yl.Lo;
+                                        #增加对变量域的更新和更新相关其他变量的边界更新
+                                        puccout.Up(uc_b,c_b) = sum(npmr$(ord(npmr)=Interval), PuccoutnUp_pmr(uc_b,c_b,npmr));
+                                        puccout.Lo(uc_b,c_b) = sum(npmr$(ord(npmr)=Interval), PuccoutnLo_pmr(uc_b,c_b,npmr));
+                                        #更新fuc-uc/uf-ucout,fuc-uc-ucin
+                                        fsm.Up(sc,mc)$(asm(sc,mc) and uout(uc_b,sc))
+                                               = min(FucU(uc_b),
+                                                     sum(uc$uin(mc,uc), FucU(uc)*PucinU(uc,c_b)/max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b)) )
+                                                 );   #fucuc_UP-ucout
+                                        fsm.Up(sc,mf)$(asm(sc,mf) and uout(uc_b,sc))
+                                               = min(FucU(uc_b),
+                                                     sum(uf$uin(mf,uf), Fufin(uf)*PucinU(uf,c_b)/max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)) )
+                                                 );   #fucuf_UP-ucout
+                                        #更新fuc-uc-ucin (fr-u和fuf-u不参与BL项，无需更新)
+                                        PucinU(uc_b,c_b) = min(PucinU(uc_b,c_b), puccout.Up(uc_b,c_b) - Fucc_delta(uc_b,c_b)/FucU(uc_b));
+                                        fsm.Up(sc,mc)$(asm(sc,mc) and uin(mc,uc_b))
+                                               = min(sum(uc$uout(uc,sc), FucU(uc)),
+                                                     FucU(uc_b)*PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(uc$uout(uc,sc), puccout.Lo(uc,c_b)))
+                                                 );   #fucuc_UP-uin                                        
+                                        #display "after update";  
+                                        #display puccout.Up, puccout.Lo, fsm.Up;
+
+
+                                        Solve WUN_RP_PN_Abt using MIP minimizing objval;
+                                        Abt_Count = Abt_Count + 1;
+
+
+                                        #还原变量边界避免影响其他问题(基于同样的变量)
+                                        puccout.Up(uc_b,c_b) = PuccoutUp_temp(uc_b,c_b); 
+                                        puccout.Lo(uc_b,c_b) = PuccoutLo_temp(uc_b,c_b);
+                                        fsm.Up(sc,mc)$(asm(sc,mc) and uout(uc_b,sc)) = FsmUp_temp(sc,mc);
+                                        fsm.Up(sc,mf)$(asm(sc,mf) and uout(uc_b,sc)) = FsmUp_temp(sc,mf);
+                                        fsm.Up(sc,mc)$(asm(sc,mc) and uin(mc,uc_b)) = FsmUp_temp(sc,mc);
+                                        PucinU(uc_b,c_b) = PucinU_temp(uc_b,c_b); 
+                                        #display "after restore";
+                                        #display puccout.Up, puccout.Lo, fsm.Up;
+                                        #display Interval;
+                                        #display objval.L,WUN_RP_PN_Abt.objest;
+                                        if(WUN_RP_PN_Abt.objest > UB, Ypuccout_pmr_Bt(uc_b,c_b,npmr)$(ord(npmr)=Interval)=0; );#如果可紧缩记录下对应的区间值,继续执行紧缩
+                                        #display Ypuccout_pmr_Bt;
+                                        ypuccout_pmr.Up(uc_b,c_b,npmr)$(ord(npmr)=Interval) = 1;#还原
+                                        ypuccout_pmr.Lo(uc_b,c_b,npmr)$(ord(npmr)=Interval) = 0;#还原
+                                        #提前终止Abt方法:如果待紧缩变量最远侧子区间无法消减(对于靠近下边界，最远侧是子区间Npmr_U)，则跳出边界紧缩过程，优先判断
+                                        break$(sum(npmr$(ord(npmr)=Interval and uc_c_npmr(uc_b,c_b,npmr) and ord(npmr)=1), Ypuccout_pmr_Bt(uc_b,c_b,npmr))=1) 3;
+                                        #如果没实现子区间的紧缩,则跳出子区间紧缩
+                                        break$(sum(npmr$(ord(npmr)=Interval and uc_c_npmr(uc_b,c_b,npmr)), Ypuccout_pmr_Bt(uc_b,c_b,npmr))=1); 
+                                    );
+                                );
+
+                                # Step 4.2 ------ 如果实现了变量的边界紧缩（没有两次跳出发生）则更新分割方案和变量的边界以及辅助参数
+                                #display "--------------before contraction---------------"
+                                #display puccout.Up, puccout.Lo, fsm.Up, yl.Lo;
+                                puccout.Up(uc_b,c_b) = smax(npmr$Ypuccout_pmr_Bt(uc_b,c_b,npmr), PuccoutnUp_pmr(uc_b,c_b,npmr));
+                                puccout.Lo(uc_b,c_b) = smin(npmr$Ypuccout_pmr_Bt(uc_b,c_b,npmr), PuccoutnLo_pmr(uc_b,c_b,npmr));
+                                #执行边界传播，增加对变量域(fsm)的更新和更新相关其他变量(yl)的边界更新
+                                #更新fuc-uc,fuc-uf                
+                                PucinU(uc_b,c_b) = min(PucinU(uc_b,c_b), puccout.Up(uc_b,c_b) - Fucc_delta(uc_b,c_b)/FucU(uc_b));
+                                fsm.Up(sc,mc)$(asm(sc,mc) and uout(uc_b,sc))
+                                       = min(FucU(uc_b),
+                                             sum(uc$uin(mc,uc), FucU(uc)*PucinU(uc,c_b)/max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b)) )
+                                         );   #fucuc_UP-ucout
+                                fsm.Up(sc,mf)$(asm(sc,mf) and uout(uc_b,sc))
+                                       = min(FucU(uc_b),
+                                             sum(uf$uin(mf,uf), Fufin(uf)*PucinU(uf,c_b)/max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)) )
+                                         );   #fucuf_UP-ucout
+                                fsm.Up(sc,mc)$(asm(sc,mc) and uin(mc,uc_b))
+                                       = min(sum(uc$uout(uc,sc), FucU(uc)),
+                                             FucU(uc_b)*PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(uc$uout(uc,sc), puccout.Lo(uc,c_b)) )
+                                         );   #fucuc_UP-uin   
+                                #display "--------------after contraction---------------"
+                                #display puccout.Up, puccout.Lo, fsm.Up;
+
+
+                                #先更新子区间边界，再更新分割点比较好
+                                Count_bt = 0;
+                                loop(npmr$(uc_c_npmr(uc_b,c_b,npmr) and Ypuccout_pmr_Bt(uc_b,c_b,npmr)),
+                                    Count_bt = Count_bt +1;
+                                    PuccoutnUp_pmr(uc_b,c_b,npmr_a)$(ord(npmr_a)=Count_bt) = PuccoutnUp_pmr(uc_b,c_b,npmr);
+                                    PuccoutnLo_pmr(uc_b,c_b,npmr_a)$(ord(npmr_a)=Count_bt) = PuccoutnLo_pmr(uc_b,c_b,npmr);   
+                                );                                    
+                                #清零原来的子区间多余边界值#,原来的多余分割点值
+                                PuccoutnUp_pmr(uc_b,c_b,npmr)$(ord(npmr)>Count_bt and ord(npmr)<=Npmr_U(uc_b,c_b)) = 0;
+                                PuccoutnLo_pmr(uc_b,c_b,npmr)$(ord(npmr)>Count_bt and ord(npmr)<=Npmr_U(uc_b,c_b)) = 0;
+                                Puccoutq_pmr(uc_b,c_b,qpmr)$(ord(qpmr)>(Count_bt+1) and ord(qpmr)<=(Npmr_U(uc_b,c_b)+1)) = 0;
+                                #更新Npmr_U,uc_c_npmr,uc_c_qpmr,Puccoutq_pmr,Npmr_LSol,Npmr_USol
+                                Npmr_U(uc_b,c_b) = sum(npmr$uc_c_npmr(uc_b,c_b,npmr), Ypuccout_pmr_Bt(uc_b,c_b,npmr));
+                                uc_c_npmr(uc_b,c_b,npmr) = yes$(ord(npmr) <= Npmr_U(uc_b,c_b));
+                                uc_c_qpmr(uc_b,c_b,qpmr) = yes$(ord(qpmr) <= (Npmr_U(uc_b,c_b) + 1));
+                                Puccoutq_pmr(uc_b,c_b,qpmr)$(uc_c_qpmr(uc_b,c_b,qpmr) and ord(qpmr)<=Npmr_U(uc_b,c_b)) =
+                                    sum(npmr$(uc_c_npmr(uc_b,c_b,npmr) and ord(npmr)=ord(qpmr)),PuccoutnLo_pmr(uc_b,c_b,npmr));
+                                Puccoutq_pmr(uc_b,c_b,qpmr)$(uc_c_qpmr(uc_b,c_b,qpmr) and ord(qpmr)=(Npmr_U(uc_b,c_b)+1)) =
+                                    sum(npmr$(uc_c_npmr(uc_b,c_b,npmr) and ord(npmr)=(ord(qpmr)-1)),PuccoutnUp_pmr(uc_b,c_b,npmr));
+                                Npmr_USol(uc_b,c_b) = sum(npmr$(PuccoutnUp_pmr(uc_b,c_b,npmr) >= Pucout_USol(uc_b,c_b)*1E-3
+                                                               and PuccoutnLo_pmr(uc_b,c_b,npmr) <= Pucout_USol(uc_b,c_b)*1E-3
+                                                               and uc_c_npmr(uc_b,c_b,npmr)), ord(npmr));
+                                Npmr_LSol(uc_b,c_b) = sum(npmr$(PuccoutnUp_pmr(uc_b,c_b,npmr) >= Puccout_LSol(uc_b,c_b)
+                                                               and PuccoutnLo_pmr(uc_b,c_b,npmr) <= Puccout_LSol(uc_b,c_b)
+                                                               and uc_c_npmr(uc_b,c_b,npmr)), ord(npmr));
+                                #display "---check---", Npmr_U, PuccoutnUp_pmr, PuccoutnLo_pmr, Puccoutq_pmr, Npmr_USol, Npmr_LSol, uc_c_npmr, puccout.Up, puccout.Lo;
+                                #-------------------------------
+                                uc_c_abt(uc_b,c_b) = no;#此时的(uc_b,c_b)是确定的
+                                #display uc_c_abt; 
+                            );  
+                        ); #一次loop只能执行一轮分割区间数最大的，需要多次执行，直到满足跳出条件
+                        break$(card(uc_c_abt) = 0);
+                    );
+                    Report_go(itergo, 'Abt_parti_redu') = sum((uc,c),Npmr_U_temp(uc,c))-sum((uc,c),Npmr_U(uc,c)); #只有执行紧缩的轮次才记录，跟Npmr_U_temp在同一个层次
+                );
+            );
+            
+            Report_go(itergo, 'Abt_time') = timeExec-Time_start_abt;
+            Report_go(itergo, 'Abt_Count') = Abt_Count;
+            Report_go(itergo, 'TotalTime234') = timeExec-Time_start_2;    
+            #---------------------------------------------------------------------------------------
+            #------------------------ GO-Step 3：Dynamic strengh the RP using PMR ------------------
+            #---------------------------------------------------------------------------------------
+            #Update dynamic partitions
+            #更新分割区间数-对于每轮偏差值大于Dynamic_factor的都进行分割
+            Npmr_U(uc,c)$(Pclout_BLsum_devi(uc,c) > Pclout_BLsum_devi_Ave*Dynamic_factor) = Npmr_U(uc,c) + Nd_dynamic;
+            #更新分割集合,分割点-基于动态均匀二分
+            uc_c_npmr(uc,c,npmr) = yes$(ord(npmr) <= Npmr_U(uc,c));
+            uc_c_qpmr(uc,c,qpmr) = yes$(ord(qpmr) <= (Npmr_U(uc,c) + 1));
+            #method 1:增加Nd_dynamic个分割点，均匀分割子区间的通用写法+基于动态调节因子
+            Puccoutq_pmr(uc,c,qpmr)$(uc_c_qpmr(uc,c,qpmr) and (ord(qpmr) <= Npmr_LSol(uc,c) ) and (Pclout_BLsum_devi(uc,c) > Pclout_BLsum_devi_Ave*Dynamic_factor)) = Puccoutq_pmr(uc,c,qpmr);
+            Puccoutq_pmr(uc,c,qpmr)$(uc_c_qpmr(uc,c,qpmr) and (ord(qpmr) > (Npmr_LSol(uc,c) + Nd_dynamic)) and (Pclout_BLsum_devi(uc,c) > Pclout_BLsum_devi_Ave*Dynamic_factor)) = Puccoutq_pmr(uc,c,qpmr - Nd_dynamic);
+            Puccoutq_pmr(uc,c,qpmr)$(uc_c_qpmr(uc,c,qpmr) and ((ord(qpmr) > Npmr_LSol(uc,c)) and (ord(qpmr) <= (Npmr_LSol(uc,c) + Nd_dynamic))) and (Pclout_BLsum_devi(uc,c) > Pclout_BLsum_devi_Ave*Dynamic_factor)) = 
+                sum(qpmr_a$(ord(qpmr_a) = Npmr_LSol(uc,c)), Puccoutq_pmr(uc,c,qpmr_a))                                                                                                           
+                +(sum(qpmr_a$(ord(qpmr_a) = Npmr_LSol(uc,c) + Nd_dynamic + 1), Puccoutq_pmr(uc,c,qpmr_a)) - sum(qpmr_a$(ord(qpmr_a) = Npmr_LSol(uc,c)), Puccoutq_pmr(uc,c,qpmr_a)))/(Nd_dynamic + 1)*(ord(qpmr) - Npmr_LSol(uc,c));
+            PuccoutnUp_pmr(uc,c,npmr)$uc_c_npmr(uc,c,npmr) = sum(qpmr$(ord(qpmr) = (ord(npmr) + 1)), Puccoutq_pmr(uc,c,qpmr));
+            PuccoutnLo_pmr(uc,c,npmr)$uc_c_npmr(uc,c,npmr) = sum(qpmr$(ord(qpmr) = ord(npmr)), Puccoutq_pmr(uc,c,qpmr));
+            #display Npmr_U, Puccoutq_pmr;
+            #严格的集合控制，不需要清零数据，不影响中间变量的正确更新
+        );
+    );
+
+**============Result Report===========
+    Report(case,'ObjVal') = UB;
+    Report(case,'Total time') = timeExec-Time_start_1;
+    Report(case,'Gap') = Gap;
+    Report(case,'NumBL') = card(uc)*card(c)*(card(u)+card(j)-1+Yunitselfrecycled);
+    Report(case,'NumEqu') = WUN.numEqu-1;
+    Report(case,'NumVar') = WUN.numVar-1;
+    Report(case,'NumDVar') = WUN.numDVar;
+    Report(case,'NumParvar') = card(uc)*card(c);
+    Report(case,'NumR') = card(r);
+    Report(case,'NumU') = card(u);
+    Report(case,'NumUc') = card(uc);
+    Report(case,'NumUf') = card(uf);
+    Report(case,'NumJ') = card(j);
+    Report(case,'NumC') = card(c);#可以补充个节水率指标=优化后的新鲜水用量/总设备用水量
+    #如果找到可行解，也输出
+    if(Gap > Gap_Tol and Gap < 1,
+        #display '============================================================================================================================';
+        display 'the feasible soution is found!';
+        display 'Feasible solutions:',UB, LB, Gap,  Fsm_USol, Fru_USol, Fu_USol, Fuu_USol, Fuj_USol, Pucin_USol, Pucout_USol, Pjc_USol;
+        #display '=============================================================================================================================';
+        #display  Npmr_U;
+        WUN.optfile = 0;#还原
+        putclose bbcontrol 'mipstopexpr resusd >= 10000000';#还原
+        WUN_RP_PN_Abt.optfile = 0;#还原
+    );
+    display Report_go;
+    display Report_mul;
+    #清理变量当前值和边界设定 避免影响下个算例的计算
+    option
+        clear = sol
+        clear = Objvalcou
+        clear = Freq
+        clear = fsm
+        clear = puccout
+        clear = Fsm_USol
+        clear = Fu_USol
+        clear = Pucin_USol
+        clear = Pucout_USol  
+        clear = Pjc_USol
+        clear = Fru_USol 
+        clear = Fuu_USol
+        clear = Fuj_USol
+        clear = Report_go
+        clear = Report_mul  
+    ;
+    display '                                                                 ';
+);
+display Report;
+
+
+
+**--------Export data to Excel using Connect---------
+**----extract data to Excel workbook
+embeddedCode Connect:
+- GAMSReader:
+    symbols:
+      - name: Report
+- PandasExcelWriter:
+    file: 0826WUNQCP_GO.xlsx
+    symbols:
+      - name: Report
+        range: Report!A1
+endEmbeddedCode
+

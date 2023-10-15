@@ -1,0 +1,2359 @@
+$Title  TWN model
+$ontext
+总水网络优化设计模型：案例数据取自Grossmann，Smith等
+权衡主要包括新鲜水费用，废水处理费用，管线费用和环境性能
+TWN Problem采用P formulation(学者已证明是最佳的表达方式)， 忽略水处理单元水损失，忽略杂质变化对总水量的影响
+#暂未考虑双出口的水处理单元(例如反渗透膜法水处理), 后续可以添加
+
+----需要区分建模的几个关键建模选择和默认选项：
+    是否允许新鲜水送往水处理单元（默认不允许）
+    全局优化默认相对误差 1%
+    是否考虑自循环(默认不允许)，
+    是否允许单元间的直接和间接循环(允许)
+    是否区分再生回用和再生循环(默认不区分)
+    用水单元类型（固定流率，固定杂质负荷，或者都固定）
+    是否考虑将固定杂质负荷用水单元的水流率也固定（默认不固定）
+    是否考虑水管线的投资和操作费用（基于算例）
+    
+----模型是通用的，包括固定杂质负荷和固定流率的用水单元，以及水处理单元，
+----简化为WUN问题：水处理单元空集，环境阱不设浓度上界
+----简化为TWN问题：只考虑固定流率用水单元，并且设置进口水流率为0
+总水网络一共包括12类约束(不包括硬边界约束)
+算例1： Grossmann 2006 example 1, CCE, Global optimization for the synthesis of integrated water systems in chemical processes
+       Best Obj=117.05 t/h(固定用水量，不允许自循环);  Obj=101.57t/h(不固定用水量，不允许自循环)
+算例2： Grossmann 2006 example 2, CCE, 
+       Best Obj=$381,751.35;(固定用水量，不允许自循环); Obj= 381751.34(不固定用水量，不允许自循环)
+算例3： Grossmann 2006 example 3, CCE, 
+       Best Obj=$874,057.37 (固定用水量，不允许自循环); Obj= 874057.37(不固定用水量，不允许自循环)
+算例4： Grossmann 2006 example 4, CCE, 
+        Best Obj= $1033810.95 (固定用水量，不允许自循环);  Obj= 1031887.73(不固定用水量，不允许自循环)      
+
+算例5： Kim 2012 case 2, Chemical Engineering Journal, System analysis of total water systems for water minimization
+       ----优化时暂不考虑管线约束问题   Best obj =1199935.06$(不固定用水量，不允许自循环) 100.46s
+
+算例6： Kim 2012 case 1, Chemical Engineering Journal, System analysis of total water systems for water minimization
+       ----优化时暂不考虑管线约束问题（经典算例） 5个用水单元，3个杂质，3个水处理单元 Best obj = 1,361.84 k$(不固定用水量，不允许自循环)， Baron不收敛
+                                                                            文献结果为 Fan 1,371.37 Kim 1,418.98
+
+算例7： Alva-Argáez et al. 2007,Int. J. Environment and Pollution, A conceptual decomposition of MINLP models for the design of water-using systems
+       Best Obj= $581141.24, 不允许自循环，最小流率为5t/h
+#全局最优目标值的可能并不唯一，这是为何求解析解做不到的原因
+0628更新日志： 加入多起点局部优化寻找高质量可行解程序
+0701更新日志： 加入了asm集合表示允许的连接，进一步精简了模型，加入了管线约束和费用公式
+0702更新日志： 加入了额外的管线约束水流率上下界约束，发现可以显著改善收敛，算例7， 8线程2500s收敛，（进一步基于算术和洞察精简浓度边界？）
+0703更新日志： 加入了仅考虑管线操作费用的NLP模型，Yobjfun=4激活
+0705更新日志： 证明了模型的通用性(可以转化为WUN或者TWN问题)
+0718更新日志： 加入新鲜水到处理单元的连接可能性（稀释水从而提高处理量，减少新鲜水用量的目的）
+0720更新日志： 水处理量上界更新为跟是否考虑循环有关
+0826更新日志： 同时考虑杂质流和水流率限制的fsm边界(暂不加入)
+0827更新日志： #关于是否考虑自循环和系统是否包括循环结构的区别，Fl.UP跟是否考虑自循环无关，跟是否考虑系统循环有关
+              #GO第1和第2，3步
+0830更新日志： 改进Fu循环水量的上界，跟Fl不一样(只有TWN的代码需要改)，更紧的fsm初始边界，还差最后的abt过程改写。
+              Fl**alpha采用
+              #注意分母可能为0的，都要写成if
+              #TWN除自循环流股和FL,fll流股的初始边界，我是默认不管是否考虑循环结构，分支流股的最大水量都是限制在用水单元总水量以下的。
+              #只不过是是否考虑FL的水量上界为该最大值，因为不考虑循环的话，FL的水量是该值的，考虑循环，可以大于该值
+0902更新日志： #Abt过程完成了plcout的紧缩程序，还需要统一其他的部分。
+0903更新日志： #改进了RP构建方法，不同非线性项分开处理, Abt过程完成Flout部分和pucout边界紧缩部分的编写，BL和FLnlp改为分开处理
+0904更新日志： 添加 puccout abt部分, BL和FL_alpha部分分开处理, 进一步的边界更新， 还有小值按0处理
+$offtext
+$eolcom #
+#==============================================================================
+Option solprint = on ;
+Option sysout   = off ;
+option MIP      = Gurobi;
+option MIQCP    = Baron;
+option NLP      = Conopt;#Conopt, Baron
+option QCP      = Conopt;# Gurobi, Baron, Conopt
+option MINLP    = Dicopt;# Gurobi, Baron, Conopt, Convert, Dicopt
+option Optcr    = 1E-3;    # eps_{OPT TOL} = 1 * 10^-3
+option Reslim   = 3600;# 1 hour time limit
+option Decimals = 3;
+option Threads  = 8;
+option Bratio = 1;#不使用初始点作为求解器的基
+#==========================代码块==============================================
+$onEcho > TWN_models.gms
+*========================Part 1: Abstract model ================================================
+*Sets, Parameters, variablbes and equations declared on total set
+*Problem Topology
+Sets
+    case 'case index'
+    r_   'Fresh water sources' 
+    u_   'Water using units'
+    l_   'Treatment units' 
+    j_   'discharge sinks'
+    c_   'Components'
+    s_   'Splitters'
+    m_   'Mixers';
+Sets
+    r(r_)  'Instance of fresh water sources'  
+    u(u_)  'Instance of water using units'
+    l(l_)  'Instance of treatment units' 
+    j(j_)  'Instance of discharge sinks(virtual)'
+    uc(u_) 'Instance of water using units of UC type'
+    uf(u_) 'Instance of water using units of UF type'
+    c(c_)  'Instance of components'
+    s(s_)  'Instance of splitters'
+    sr(s_) 'Instance of splitters at the outlet of fresh water sources'
+    sc(s_) 'Instance of splitters at the outlet of water using units of UC type'
+    sf(s_) 'Instance of splitters at the outlet of water using units of UF type'
+    sl(s_) 'Instance of Splitters at the outlet of treatment units'
+    m(m_)  'Instance of mixers'
+    mu(m_) 'Instance of mixers at the inlet of water using units'
+    mc(m_) 'Instance of mixers at the inlet of water using units of UC type'
+    mf(m_) 'Instance of mixers at the inlet of water using units of UF type'
+    ml(m_) 'Instance of Mixers at the inlet of treatment units'
+    mj(m_) 'Instance of mixers at the inlet of discharge sink j';   
+Sets
+    rout(r_,s_)    'Allowable connection between r and s'  
+    uout(u_,s_)    'Allowable connection between u and s'  
+    uin(m_,u_)     'Allowable connection between m and u'
+    lout(l_,s_)    'Allowable connection between l and s'  
+    lin(m_,l_)     'Allowable connection between m and l'
+    jin(m_,j_)     'Allowable connection between m and j'
+    ssm(s_,m_) 'Self-recycled stream(from the outlet of unit XX  to the inlet of unit XX)'
+    asm(s_,m_)     'Allowable connection from s to m'
+    
+;
+Alias (u,ua),(uc,uca),(uf,ufa),(l,la),(sc,sca),(sl,sla),(c,ca);
+*==============================================================================
+Scalar
+    Kloop            'Ratio of flowrate of total flow of cyclic of any unit l/u to the sum of flowrate of total flow of FucU' /3/
+    V_pipe           'Water flow velocity in the  pipeline (s,m), m/s' /1/ #参考自Smith 2007
+    VC_pipe          'Capital Cost coefficient of pipeline (s,m) of the variable part, $/m3/y' /1.001/ #参考自Smith 2007-3603.4/3600---并经过单位换算---
+    FC_pipe          'Capital Cost coefficient of pipeline (s,m) of the fixed part, $/y'/124.6/
+    FpipeUp          'addtitional limitation of maximum allowable water flowrate of the pipe, t/h' /1E+4/#a big enough number
+    FpipeLo          'addtitional limitation of minimum allowable water flowrate of the pipe, t/h' /5/#2-5 
+;
+Parameters
+    #physical related parameters     
+    Prc(r_,c_)       'Concentration of component c of r, 10^3 ppm'
+    PucinU(u_,c_)    'Upper bound of concentration of component c at the inlet of u, 10^3 ppm'
+    PucinL(u_,c_)    'lower bound of concentration of component c at the inlet of u, 10^3 ppm'
+    PuccoutU(u_,c_)  'Upper bound of concentration of component c at the outlet of uc, 10^3 ppm'
+    FucU(u_)         'Upper bound of flowrate of total flow of uc, t/h'
+    FucL(u_)         'lower bound of flowrate of total flow of uc, t/h'
+    Fucc_delta(u_,c_)'Transferred load of flowrate of component flow c of uc from process stream, kg/h'
+    Fufin(u_)        'Flowrate of total flow at the inlet of uf, t/h'
+    Fufout(u_)       'Flowrate of total flow at the outlet of uf, t/h'
+    Pufcout(u_,c_)   'Concentration of component c at the outlet of uf, 10^3 ppm'
+    Rlc(l_,c_)       'Removal ratio of component c of treatment unit l'
+    PlcinU(l_,c_)    'Upper bound of concentration of component c at the inlet of treatment unit l, 10^3 ppm'
+    PjcU(j_,c_)      'Upper bound of concentration of component c at the inlet of discharge sink j, 10^3 ppm'
+    D_pipe(s_,m_)    'length of the pipeline (s,m), m'
+    #Cost related parameters
+    H                'total time of opertion of the plant in one year, hours'
+    Af               'annualized factor for investment on the treatment units or pipeline' 
+    Alpha(l_)        'cost function exponent'
+    Cr(r_)           'freshwater cost of source r, $/t'
+    OCl(l_)          'investment cost coefficient for treatment unit l'
+    ICl(l_)          'operating cost coefficient for treatment unit l'
+
+; 
+Parameters #辅助参数声明(当前上定界模型解参数)
+    Num_connections_USol 'Connection number of the solution ' /1E+5/ #默认值取1E+5
+    Fsm_USol(s_,m_)    'Flowrate of total flow from splitter s to mixer m, t/h'
+    Fl_USol(l_)        'Flowrate of total flow of treatment unit l, t/h, t/h'
+    Plcin_USol(l_,c_)  'Concentration of component c at the inlet of l, ppm'
+    Plcout_USol(l_,c_) 'Concentration of component c at the outlet of l, ppm'                                                
+    Pjc_USol(j_,c_)    'Concentration of component c of discharge sink j, ppm'
+    Puccin_USol(u_,c_) 'ppm'
+    Puccout_USol(u_,c_)'ppm'
+    Fuc_USol(u_)       't/h'
+    Fj_USol(j_)        't/h'
+    Fru_USol(r_,u_)
+    Fuu_USol(u_,u_)
+    Ful_USol(u_,l_)
+    Fuj_USol(u_,j_)
+    Flu_USol(l_,u_)
+    Fll_USol(l_,l_)
+    Flj_USol(l_,j_)
+    YNL_alpha  '是否存在非线性fl**alpha'
+    YObjfun '选择模型的目标函数'
+    Yucflowratefixed 'uc单元是否固定水流率'
+    Yrecycled '系统循环,处理单元水量不受限'
+    Yunitselfrecycled '用水或者水处理单元是否考虑自循环'
+    Ypipe_include '模型是否考虑管线因素'
+    Yrl     '是否考虑新鲜水源r到处理单元l的流股存在'
+    Report(case,*)      'Report'
+    Report_mul(*,*)
+;  
+*=======================================================================
+Positive Variables
+    fsm(s_,m_)       'Flowrate of total flow from splitter s to mixer m, t/h'
+    fr(r_)           'Flowrate of total flow of fresh water source l, t/h'
+    fl(l_)           'Flowrate of total flow of treatment l, t/h'
+    puccout(u_,c_)   'Concentration of component c at the outlet of unit uc, 10^3 ppm'
+    plcout(l_,c_)    'Concentration of component c at the outlet of treatment unit l, 10^3 ppm'
+#Variables used only for RP model
+    fl_alpha(l_)
+    fsmc(s_,m_,c_)   'Flowrate of component flow c from splitter s to mixer m, kg/h'
+
+Binary variables
+    ysm(s_,m_)       'equal to 1 if the connection (s,m) is exist'
+;
+Free Variable  objval;
+Equations
+    p0_objfun_tf
+    p0_objfun_tac_without_pipe
+    p0_objfun_tac_with_pipe
+    p0_objfun_tac_with_pipe_operating
+    p0_objfun_tac_without_pipe_RP
+    p0_objfun_tac_with_pipe_RP
+    p0_objfun_tac_with_pipe_operating_RP
+    p1(r_)
+    p2(m_,u_,s_)
+    p3(m_,u_)
+    p4(u_,s_)
+    p5(m_,u_,s_,c_)
+    p5_RP(m_,u_,s_,c_)
+    p6(m_,u_)
+    p7(m_,u_)
+    p8(m_,u_,c_)
+    p8_RP(m_,u_,c_)
+    p9(m_,u_,c_)
+    p9_RP(m_,u_,c_)
+    p10(m_,l_,s_)
+    p11(m_,l_)
+    p12(m_,l_,s_,c_)
+    p12_RP(m_,l_,s_,c_)
+    p13(m_,l_,c_)
+    p13_RP(m_,l_,c_)
+    p14(m_,j_,c_)
+    p14_RP(m_,j_,c_)
+    p15(s_,m_)
+    p16(s_,m_)
+;
+*======================== Models (declared on total set and defined on subset) ================================================
+#objective function: sum of total flowrate of fresh water
+    #总水量为目标函数
+    p0_objfun_tf$(YObjfun = 1)..                          objval =e= sum(r, fr(r)) + sum(l, fl(l)); 
+    #费用最优为目标函数                                                      
+    p0_objfun_tac_without_pipe$(YObjfun = 2)..            objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                     +H*sum(l, OCl(l)*fl(l))
+                                                                     +Af*sum(l, ICl(l)*(fl(l)+1E-5)**Alpha(l))
+                                                                     ;
+    p0_objfun_tac_without_pipe_RP$(YObjfun = 2)..         objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                     +H*sum(l, OCl(l)*fl(l))
+                                                                     +Af*sum(l, ICl(l)*fl_alpha(l))
+                                                                     ;
+    #目标函数总年化费用包括管线费用
+    p0_objfun_tac_with_pipe_operating$(YObjfun = 3)..    objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                    + H*sum(l, OCl(l)*fl(l))
+                                                                    + Af*sum(l, ICl(l)*(fl(l)+1E-5)**Alpha(l))
+                                                                    + Af*sum(asm(s,m), (VC_pipe/V_pipe*fsm(s,m)
+                                                                                        )*D_pipe(s,m))          
+                                                                    ;
+    p0_objfun_tac_with_pipe_operating_RP$(YObjfun = 3)..    objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                    + H*sum(l, OCl(l)*fl(l))
+                                                                    + Af*sum(l, ICl(l)*fl_alpha(l))
+                                                                    + Af*sum(asm(s,m), (VC_pipe/V_pipe*fsm(s,m)
+                                                                                        )*D_pipe(s,m))          
+                                                                    ;
+    p0_objfun_tac_with_pipe$(YObjfun = 4)..              objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                    + H*sum(l, OCl(l)*fl(l))
+                                                                    + Af*sum(l, ICl(l)*(fl(l)+1E-5)**Alpha(l))
+                                                                    + Af*sum(asm(s,m), (VC_pipe/V_pipe*fsm(s,m)
+                                                                                       + FC_pipe*ysm(s,m))*D_pipe(s,m))          
+                                                                     ;
+
+    p0_objfun_tac_with_pipe_RP$(YObjfun = 4)..              objval =e= H*sum(r, Cr(r)*fr(r)) 
+                                                                    + H*sum(l, OCl(l)*fl(l))
+                                                                    + Af*sum(l, ICl(l)*fl_alpha(l))
+                                                                    + Af*sum(asm(s,m), (VC_pipe/V_pipe*fsm(s,m)
+                                                                                       + FC_pipe*ysm(s,m))*D_pipe(s,m))          
+                                                                     ;                                                           
+    #mass balance of total flow at r
+    p1(r)..                                     fr(r) =e= sum((sr,m)$(rout(r,sr) and asm(sr,m)), fsm(sr,m)); 
+    #mass balance of total flow at uc 
+    p2(mc,uc,sc)$(uin(mc,uc) and uout(uc,sc))..
+                                                sum(s$asm(s,mc), fsm(s,mc)) =e= sum(m$asm(sc,m), fsm(sc,m));
+    #mass balance of total flow at the inlet of uf 
+    p3(mf,uf)$uin(mf,uf)..                      sum(s$asm(s,mf), fsm(s,mf)) =e= Fufin(uf);
+    #mass balance of total flow at the outlet of uf 
+    p4(uf,sf)$uout(uf,sf)..                     Fufout(uf) =e= sum(m$asm(sf,m), fsm(sf,m));
+    #---mass balance of component flow c at uc 
+    p5(mc,uc,sc,c)$(uin(mc,uc) and uout(uc,sc))..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,mc)), fsm(sr,mc)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,mc)), fsm(sf,mc)*Pufcout(uf,c))
+                                                + sum((uca,sca)$(uout(uca,sca) and asm(sca,mc)), fsm(sca,mc)*puccout(uca,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,mc)), fsm(sl,mc)*plcout(l,c))
+                                                + Fucc_delta(uc,c)
+                                                =e=
+                                                puccout(uc,c)*sum(m$asm(sc,m), fsm(sc,m));
+                                           
+
+    #mass balance of component flow c at uc in RP                                         
+    p5_RP(mc,uc,sc,c)$(uin(mc,uc) and uout(uc,sc))..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,mc)), fsm(sr,mc)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,mc)), fsm(sf,mc)*Pufcout(uf,c))
+                                                + sum((uca,sca)$(uout(uca,sca) and asm(sca,mc)), fsmc(sca,mc,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,mc)), fsmc(sl,mc,c))
+                                                + Fucc_delta(uc,c)
+                                                =e=
+                                                sum(m$asm(sc,m), fsmc(sc,m,c));
+                                                
+
+    #upper bound  of total flow at the inlet of uc 
+    p6(mc,uc)$uin(mc,uc)..                      sum(s$asm(s,mc), fsm(s,mc)) =l= FucU(uc);
+    #lower bound  of total flow at the inlet of uc 
+    #p7(mc,uc)$uin(mc,uc)..                      sum(s$(not ssm(s,mc)), fsm(s,mc)) =g= smax(c, Fucc_delta(uc,c)/puccout.UP(uc,c));
+    p7(mc,uc)$uin(mc,uc)..                     sum(s$asm(s,mc), fsm(s,mc)) =g= FucL(uc);
+    #upper bound  of component flow c at the inlet of u
+    p8(m,u,c)$uin(m,u)..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,m)), fsm(sr,m)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,m)), fsm(sf,m)*Pufcout(uf,c)) 
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,m)), fsm(sc,m)*puccout(uc,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,m)), fsm(sl,m)*plcout(l,c))
+                                                =l=
+                                                PucinU(u,c)*sum(s$asm(s,m), fsm(s,m));
+    #upper bound  of component flow c at the inlet of u in RP
+    p8_RP(m,u,c)$uin(m,u)..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,m)), fsm(sr,m)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,m)), fsm(sf,m)*Pufcout(uf,c)) 
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,m)), fsmc(sc,m,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,m)), fsmc(sl,m,c))
+                                                =l=
+                                                PucinU(u,c)*sum(s$asm(s,m), fsm(s,m));                                                                                 
+    #lower bound  of component flow c at the inlet of u
+    p9(m,u,c)$uin(m,u)..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,m)),   fsm(sr,m)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,m)), fsm(sf,m)*Pufcout(uf,c)) 
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,m)), fsm(sc,m)*puccout(uc,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,m)), fsm(sl,m)*plcout(l,c))
+                                                =g=
+                                                PucinL(u,c)*sum(s$asm(s,m), fsm(s,m));
+    #lower bound  of component flow c at the inlet of u in RP
+    p9_RP(m,u,c)$uin(m,u)..
+                                                sum((r,sr)$(rout(r,sr) and asm(sr,m)),   fsm(sr,m)*Prc(r,c)) 
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,m)), fsm(sf,m)*Pufcout(uf,c)) 
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,m)), fsmc(sc,m,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,m)), fsmc(sl,m,c))
+                                                =g=
+                                                PucinL(u,c)*sum(s$asm(s,m), fsm(s,m));                                   
+
+    #mass balance of total flow at l 
+    p10(ml,l,sl)$(lin(ml,l) and lout(l,sl)) ..  sum(s$asm(s,ml), fsm(s,ml)) =e= sum(m$asm(sl,m), fsm(sl,m));
+ 
+    #explicit expression of total flow at l
+    p11(ml,l)$(lin(ml,l)) ..                    sum(s$asm(s,ml), fsm(s,ml)) =e= fl(l);
+
+    #mass balance of component flow c  at l
+    p12(ml,l,sl,c)$(lout(l,sl) and lin(ml,l))..
+                                                sum(m$asm(sl,m), fsm(sl,m))*plcout(l,c) =e= (1- Rlc(l,c))*
+                                                ( sum((r,sr)$(rout(r,sr) and asm(sr,ml)), fsm(sr,ml)*Prc(r,c))
+                                                  + sum((uf,sf)$(uout(uf,sf) and asm(sf,ml)), fsm(sf,ml)*Pufcout(uf,c))
+                                                  + sum((uc,sc)$(uout(uc,sc) and asm(sc,ml)), fsm(sc,ml)*puccout(uc,c))
+                                                  + sum((la,sla)$(lout(la,sla) and asm(sla,ml)), fsm(sla,ml)*plcout(la,c))
+                                                );
+    #mass balance of component flow c  at l in RP                                                
+    p12_RP(ml,l,sl,c)$(lout(l,sl) and lin(ml,l))..
+                                                sum(m$asm(sl,m), fsmc(sl,m,c)) =e= (1- Rlc(l,c))*
+                                                ( sum((r,sr)$(rout(r,sr) and asm(sr,ml)), fsm(sr,ml)*Prc(r,c))
+                                                  + sum((uf,sf)$(uout(uf,sf) and asm(sf,ml)), fsm(sf,ml)*Pufcout(uf,c))
+                                                  + sum((uc,sc)$(uout(uc,sc) and asm(sc,ml)), fsmc(sc,ml,c))
+                                                  + sum((la,sla)$(lout(la,sla) and asm(sla,ml)), fsmc(sla,ml,c))
+                                                );                                                
+
+    #Concentration upper bound of component  c  at lin
+    p13(ml,l,c)$lin(ml,l)..                     sum((r,sr)$(rout(r,sr) and asm(sr,ml)), fsm(sr,ml)*Prc(r,c))
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,ml)), fsm(sf,ml)*Pufcout(uf,c))
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,ml)), fsm(sc,ml)*puccout(uc,c))
+                                                + sum((la,sla)$(lout(la,sla) and asm(sla,ml)), fsm(sla,ml)*plcout(la,c))
+                                                =l=
+                                                PlcinU(l,c)*sum(s$asm(s,ml), fsm(s,ml));
+
+    #Concentration upper bound of component  c  at lin in RP 
+    p13_RP(ml,l,c)$lin(ml,l)..                  sum((r,sr)$(rout(r,sr) and asm(sr,ml)), fsm(sr,ml)*Prc(r,c))
+                                                + sum((uf,sf)$(uout(uf,sf) and asm(sf,ml)), fsm(sf,ml)*Pufcout(uf,c))
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,ml)), fsmc(sc,ml,c))
+                                                + sum((la,sla)$(lout(la,sla) and asm(sla,ml)), fsmc(sla,ml,c))
+                                                =l=
+                                                PlcinU(l,c)*sum(s$asm(s,ml), fsm(s,ml));
+
+
+    #Concentration upper bound of component  c  at mjin
+    p14(mj,j,c)$jin(mj,j)..                     sum((uf,sf)$(uout(uf,sf) and asm(sf,mj)), fsm(sf,mj)*Pufcout(uf,c))
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,mj)), fsm(sc,mj)*puccout(uc,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,mj)), fsm(sl,mj)*plcout(l,c))
+                                                =l=
+                                                PjcU(j,c)*sum(s$asm(s,mj), fsm(s,mj));
+    #Concentration upper bound of component  c  at mjin in RP
+    p14_RP(mj,j,c)$jin(mj,j)..                  sum((uf,sf)$(uout(uf,sf) and asm(sf,mj)), fsm(sf,mj)*Pufcout(uf,c))
+                                                + sum((uc,sc)$(uout(uc,sc) and asm(sc,mj)), fsmc(sc,mj,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,mj)), fsmc(sl,mj,c))
+                                                =l=
+                                                PjcU(j,c)*sum(s$asm(s,mj), fsm(s,mj)); 
+
+    #logical constraint of fsm and ysm
+    p15(s,m)$(asm(s,m) and Ypipe_include)..                        fsm(s,m) =l= min(FpipeUp, fsm.Up(s,m))*ysm(s,m);
+    p16(s,m)$(asm(s,m) and Ypipe_include)..                        fsm(s,m) =g= max(FpipeLo, fsm.Lo(s,m))*ysm(s,m);
+
+*======================== LP underestimator of FL**alpha terms =========
+Equations
+    fl_alpha_undetesti(l_)  
+;
+    fl_alpha_undetesti(l)..                                        fl_alpha(l) =g= ((fl.Up(l))**Alpha(l)-(fl.Lo(l))**Alpha(l))/(fl.Up(l)-fl.Lo(l))*(fl(l)-fl.Lo(l)) + (fl.Lo(l))**Alpha(l);
+*======================== Mc envelopes for BL terms =========
+Equations
+    fsmc_uc_MC1(u_,s_,m_,c_)
+    fsmc_uc_MC2(u_,s_,m_,c_)
+    fsmc_uc_MC3(u_,s_,m_,c_)
+    fsmc_uc_MC4(u_,s_,m_,c_)
+    fsmc_l_MC1(l_,s_,m_,c_)
+    fsmc_l_MC2(l_,s_,m_,c_)
+    fsmc_l_MC3(l_,s_,m_,c_)
+    fsmc_l_MC4(l_,s_,m_,c_)
+;
+    #fsmc_uc(s_,m_,c_)   'Flowrate of component flow c from splitter sc to mixer m, kg/h'
+    fsmc_uc_MC1(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..          fsmc(sc,m,c) =g= puccout.Up(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.Up(sc,m) -
+                                                                                  puccout.Up(uc,c)*fsm.Up(sc,m);
+    fsmc_uc_MC2(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..          fsmc(sc,m,c) =g= puccout.Lo(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.Lo(sc,m) -
+                                                                                  puccout.Lo(uc,c)*fsm.Lo(sc,m);
+    fsmc_uc_MC3(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..          fsmc(sc,m,c) =l= puccout.Up(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.Lo(sc,m) -
+                                                                                  puccout.Up(uc,c)*fsm.Lo(sc,m);
+    fsmc_uc_MC4(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..          fsmc(sc,m,c) =l= puccout.Lo(uc,c)*fsm(sc,m) + puccout(uc,c)*fsm.Up(sc,m) -
+                                                                                  puccout.Lo(uc,c)*fsm.Up(sc,m);   
+    #fsmc_l(s_,m_,c_)   'Flowrate of component flow c from splitter sl to mixer m, kg/h'
+    fsmc_l_MC1(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..          fsmc(sl,m,c) =g= plcout.Up(l,c)*fsm(sl,m) + plcout(l,c)*fsm.Up(sl,m) -
+                                                                                  plcout.Up(l,c)*fsm.Up(sl,m);
+    fsmc_l_MC2(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..          fsmc(sl,m,c) =g= plcout.Lo(l,c)*fsm(sl,m) + plcout(l,c)*fsm.Lo(sl,m) -
+                                                                                  plcout.Lo(l,c)*fsm.Lo(sl,m);
+    fsmc_l_MC3(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..          fsmc(sl,m,c) =l= plcout.Up(l,c)*fsm(sl,m) + plcout(l,c)*fsm.Lo(sl,m) -
+                                                                                  plcout.Up(l,c)*fsm.Lo(sl,m);
+    fsmc_l_MC4(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..          fsmc(sl,m,c) =l= plcout.Lo(l,c)*fsm(sl,m) + plcout(l,c)*fsm.Up(sl,m) -
+                                                                                  plcout.Lo(l,c)*fsm.Up(sl,m);
+
+#====================================PMR Model(nf4r_formula)=====================================
+Set np 'PMR 分割区间数总集合' /1*1000/;
+#---fsmc_uc-----
+Set uc_c_np(u_,c_,np) '不同puccout对应的分割区间数';
+Parameters PuccoutnUp_pmr(u_,c_,np) '子区间浓度上界', PuccoutnLo_pmr(u_,c_,np) '子区间浓度下界';
+Positive variables fsmcn_uc_pmr_d(s_,m_,c_,np) '凸包重构后fsm(sl,m)对应于puccout(l,c,np)的分解变量, 一定要引入下标c, 因为不同杂质对应的np是也就是(c,np)是独立，激活的np是不相关的';
+Binary Variables ypuccout_pmr(u_,c_,np) 'puccout是否落在浓度子区间 np 的二元变量';
+Equations
+    eqbipuccout_pmr1(u_,c_)                   
+    eqpuccoutU_pmr2a(u_,c_)                     
+    eqpuccoutL_pmr2b(u_,c_)                      
+    eqsumt_uc_pmr3a(u_,s_,m_,c_)                         
+    eqfsmcnU_uc_pmr3b(u_,s_,m_,c_,np)                  
+    eqfsmcnL_uc_pmr3c(u_,s_,m_,c_,np)                     
+    fsmc_uc_pmr4a(u_,s_,m_,c_)                             
+    fsmc_uc_pmr4b(u_,s_,m_,c_)                         
+    fsmc_uc_pmr4c(u_,s_,m_,c_)                                 
+    fsmc_uc_pmr4d(u_,s_,m_,c_)
+;
+
+    eqbipuccout_pmr1(uc,c)..                        sum(np$uc_c_np(uc,c,np), ypuccout_pmr(uc,c,np)) =e= 1;
+    eqpuccoutU_pmr2a(uc,c)..                        puccout(uc,c) =l= sum(np$uc_c_np(uc,c,np), PuccoutnUp_pmr(uc,c,np)*ypuccout_pmr(uc,c,np));
+    eqpuccoutL_pmr2b(uc,c)..                        puccout(uc,c) =g= sum(np$uc_c_np(uc,c,np), PuccoutnLo_pmr(uc,c,np)*ypuccout_pmr(uc,c,np));  
+    eqsumt_uc_pmr3a(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    sum(np$uc_c_np(uc,c,np), fsmcn_uc_pmr_d(sc,m,c,np)) =e= fsm(sc,m);        
+    eqfsmcnU_uc_pmr3b(uc,sc,m,c,np)$(uout(uc,sc) and asm(sc,m) and uc_c_np(uc,c,np))..
+                                                    fsmcn_uc_pmr_d(sc,m,c,np) =l= fsm.Up(sc,m)*ypuccout_pmr(uc,c,np);
+    eqfsmcnL_uc_pmr3c(uc,sc,m,c,np)$(uout(uc,sc) and asm(sc,m) and uc_c_np(uc,c,np))..
+                                                    fsmcn_uc_pmr_d(sc,m,c,np) =g= fsm.Lo(sc,m)*ypuccout_pmr(uc,c,np);
+    fsmc_uc_pmr4a(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    fsmc(sc,m,c) =g= sum(np$uc_c_np(uc,c,np), PuccoutnUp_pmr(uc,c,np)*fsmcn_uc_pmr_d(sc,m,c,np)) + fsm.Up(sc,m)*puccout(uc,c) - sum(np$uc_c_np(uc,c,np), puccoutnUp_pmr(uc,c,np)*fsm.Up(sc,m)*ypuccout_pmr(uc,c,np));                                 
+    fsmc_uc_pmr4b(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    fsmc(sc,m,c) =g= sum(np$uc_c_np(uc,c,np), PuccoutnLo_pmr(uc,c,np)*fsmcn_uc_pmr_d(sc,m,c,np)) + fsm.Lo(sc,m)*puccout(uc,c) - sum(np$uc_c_np(uc,c,np), puccoutnLo_pmr(uc,c,np)*fsm.Lo(sc,m)*ypuccout_pmr(uc,c,np));                                 
+    fsmc_uc_pmr4c(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    fsmc(sc,m,c) =l= sum(np$uc_c_np(uc,c,np), PuccoutnUp_pmr(uc,c,np)*fsmcn_uc_pmr_d(sc,m,c,np)) + fsm.Lo(sc,m)*puccout(uc,c) - sum(np$uc_c_np(uc,c,np), puccoutnUp_pmr(uc,c,np)*fsm.Lo(sc,m)*ypuccout_pmr(uc,c,np));                                 
+    fsmc_uc_pmr4d(uc,sc,m,c)$(uout(uc,sc) and asm(sc,m))..
+                                                    fsmc(sc,m,c) =l= sum(np$uc_c_np(uc,c,np), PuccoutnLo_pmr(uc,c,np)*fsmcn_uc_pmr_d(sc,m,c,np)) + fsm.Up(sc,m)*puccout(uc,c) - sum(np$uc_c_np(uc,c,np), puccoutnLo_pmr(uc,c,np)*fsm.Up(sc,m)*ypuccout_pmr(uc,c,np));                                                                         
+
+#---fsmc_l-----
+Set l_c_np(l_,c_,np) '不同plcout对应的分割区间数';
+Parameters PlcoutnUp_pmr(l_,c_,np) '子区间浓度上界', PlcoutnLo_pmr(l_,c_,np) '子区间浓度下界';
+Positive variables fsmcn_l_pmr_d(s_,m_,c_,np) '凸包重构后fsm(sl,m)对应于plcout(l,c,np)的分解变量, 一定要引入下标c, 因为不同杂质对应的np是也就是(c,np)是独立，激活的np是不相关的';
+Binary Variables yplcout_pmr(l_,c_,np) 'plcout是否落在浓度子区间 np 的二元变量';
+Equations
+    eqbiplcout_pmr1(l_,c_)                   
+    eqplcoutU_pmr2a(l_,c_)                     
+    eqplcoutL_pmr2b(l_,c_)                      
+    eqsumt_l_pmr3a(l_,s_,m_,c_)                         
+    eqfsmcnU_l_pmr3b(l_,s_,m_,c_,np)                  
+    eqfsmcnL_l_pmr3c(l_,s_,m_,c_,np)                     
+    fsmc_l_pmr4a(l_,s_,m_,c_)                             
+    fsmc_l_pmr4b(l_,s_,m_,c_)                         
+    fsmc_l_pmr4c(l_,s_,m_,c_)                                 
+    fsmc_l_pmr4d(l_,s_,m_,c_)
+;
+
+    eqbiplcout_pmr1(l,c)..                          sum(np$l_c_np(l,c,np), yplcout_pmr(l,c,np)) =e= 1;
+    eqplcoutU_pmr2a(l,c)..                          plcout(l,c) =l= sum(np$l_c_np(l,c,np), PlcoutnUp_pmr(l,c,np)*yplcout_pmr(l,c,np));
+    eqplcoutL_pmr2b(l,c)..                          plcout(l,c) =g= sum(np$l_c_np(l,c,np), PlcoutnLo_pmr(l,c,np)*yplcout_pmr(l,c,np));  
+    eqsumt_l_pmr3a(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..
+                                                    sum(np$l_c_np(l,c,np), fsmcn_l_pmr_d(sl,m,c,np)) =e= fsm(sl,m);        
+    eqfsmcnU_l_pmr3b(l,sl,m,c,np)$(lout(l,sl) and asm(sl,m) and l_c_np(l,c,np))..
+                                                    fsmcn_l_pmr_d(sl,m,c,np) =l= fsm.Up(sl,m)*yplcout_pmr(l,c,np);
+    eqfsmcnL_l_pmr3c(l,sl,m,c,np)$(lout(l,sl) and asm(sl,m) and l_c_np(l,c,np))..
+                                                    fsmcn_l_pmr_d(sl,m,c,np) =g= fsm.Lo(sl,m)*yplcout_pmr(l,c,np);
+    fsmc_l_pmr4a(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..
+                                                    fsmc(sl,m,c) =g= sum(np$l_c_np(l,c,np), PlcoutnUp_pmr(l,c,np)*fsmcn_l_pmr_d(sl,m,c,np)) + fsm.Up(sl,m)*plcout(l,c) - sum(np$l_c_np(l,c,np), plcoutnUp_pmr(l,c,np)*fsm.Up(sl,m)*yplcout_pmr(l,c,np));                                 
+    fsmc_l_pmr4b(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..
+                                                    fsmc(sl,m,c) =g= sum(np$l_c_np(l,c,np), PlcoutnLo_pmr(l,c,np)*fsmcn_l_pmr_d(sl,m,c,np)) + fsm.Lo(sl,m)*plcout(l,c) - sum(np$l_c_np(l,c,np), plcoutnLo_pmr(l,c,np)*fsm.Lo(sl,m)*yplcout_pmr(l,c,np));                                 
+    fsmc_l_pmr4c(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..
+                                                    fsmc(sl,m,c) =l= sum(np$l_c_np(l,c,np), PlcoutnUp_pmr(l,c,np)*fsmcn_l_pmr_d(sl,m,c,np)) + fsm.Lo(sl,m)*plcout(l,c) - sum(np$l_c_np(l,c,np), plcoutnUp_pmr(l,c,np)*fsm.Lo(sl,m)*yplcout_pmr(l,c,np));                                 
+    fsmc_l_pmr4d(l,sl,m,c)$(lout(l,sl) and asm(sl,m))..
+                                                    fsmc(sl,m,c) =l= sum(np$l_c_np(l,c,np), PlcoutnLo_pmr(l,c,np)*fsmcn_l_pmr_d(sl,m,c,np)) + fsm.Up(sl,m)*plcout(l,c) - sum(np$l_c_np(l,c,np), plcoutnLo_pmr(l,c,np)*fsm.Up(sl,m)*yplcout_pmr(l,c,np));                                                                         
+
+
+#====================================Piecewise underestimators of fl_alpha=====================================
+Set l_np(l_,np) '不同fl对应的fl_alpha分割区间数';
+Parameters
+    FlnUp_pwu(l_,np) '子区间fl上界', FlnLo_pwu(l_,np)'子区间fl下界'
+    Fl_Slope_pwu(l_,np), Fl_Intercept_pwu(l_,np)
+;
+Positive variables fln(l_,np) '凸包重构后fl(l)的分解变量';
+Binary Variables yfl_pwu(l_,np) 'fl是否落在fl子区间 np 的二元变量';
+Equations
+    fl_alpha_undetesti1(l_)
+    fl_alpha_undetesti2(l_)
+    fl_alpha_undetesti3(l_,np)
+    fl_alpha_undetesti4(l_,np)
+    fl_alpha_undetesti5(l_)
+;
+    fl_alpha_undetesti1(l)..                       fl_alpha(l) =g= sum(np$l_np(l,np), Fl_Slope_pwu(l,np)*fln(l,np)+Fl_Intercept_pwu(l,np)*yfl_pwu(l,np));
+    fl_alpha_undetesti2(l)..                       fl(l) =e= sum(np$l_np(l,np), fln(l,np));
+    fl_alpha_undetesti3(l,np)$l_np(l,np)..         fln(l,np) =l= FlnUp_pwu(l,np)*yfl_pwu(l,np);
+    fl_alpha_undetesti4(l,np)$l_np(l,np)..         fln(l,np) =g= FlnLo_pwu(l,np)*yfl_pwu(l,np);
+    fl_alpha_undetesti5(l)..                       sum(np$l_np(l,np), yfl_pwu(l,np)) =e= 1;  
+
+$offecho                                                              
+$include TWN_models
+Model TWN/
+    p0_objfun_tf
+    p0_objfun_tac_without_pipe
+    p0_objfun_tac_with_pipe
+    p1
+    p2       
+    p3
+    p4
+    p5
+    p6
+    p7
+    p8
+    p9
+    p10
+    p11
+    p12
+    p13
+    p14
+    p15
+    p16
+    /;
+Model TWN_RP_P1/
+    p0_objfun_tf
+    p0_objfun_tac_without_pipe_RP
+    p0_objfun_tac_with_pipe_RP
+    p1
+    p2       
+    p3
+    p4
+    p5_RP
+    p6
+    p7
+    p8_RP
+    p9_RP
+    p10
+    p11
+    p12_RP
+    p13_RP
+    p14_RP
+    p15
+    p16
+    fl_alpha_undetesti
+    fsmc_uc_MC1
+    fsmc_uc_MC2
+    fsmc_uc_MC3
+    fsmc_uc_MC4
+    fsmc_l_MC1
+    fsmc_l_MC2
+    fsmc_l_MC3
+    fsmc_l_MC4
+    /;
+Model TWN_RP_PN/
+    p0_objfun_tf
+    p0_objfun_tac_without_pipe_RP
+    p0_objfun_tac_with_pipe_RP
+    p1
+    p2       
+    p3
+    p4
+    p5_RP
+    p6
+    p7
+    p8_RP
+    p9_RP
+    p10
+    p11
+    p12_RP
+    p13_RP
+    p14_RP
+    p15
+    p16
+    
+    eqbipuccout_pmr1                  
+    eqpuccoutU_pmr2a                    
+    eqpuccoutL_pmr2b                     
+    eqsumt_uc_pmr3a                      
+    eqfsmcnU_uc_pmr3b               
+    eqfsmcnL_uc_pmr3c                   
+    fsmc_uc_pmr4a                        
+    fsmc_uc_pmr4b                       
+    fsmc_uc_pmr4c                                
+    fsmc_uc_pmr4d
+    
+    eqbiplcout_pmr1                
+    eqplcoutU_pmr2a                  
+    eqplcoutL_pmr2b                  
+    eqsumt_l_pmr3a                        
+    eqfsmcnU_l_pmr3b             
+    eqfsmcnL_l_pmr3c                   
+    fsmc_l_pmr4a                          
+    fsmc_l_pmr4b                   
+    fsmc_l_pmr4c                            
+    fsmc_l_pmr4d
+    
+    fl_alpha_undetesti1
+    fl_alpha_undetesti2
+    fl_alpha_undetesti3
+    fl_alpha_undetesti4
+    fl_alpha_undetesti5
+    /;
+Model TWN_RP_PN_Abt/
+    p0_objfun_tf
+    p0_objfun_tac_without_pipe_RP
+    p0_objfun_tac_with_pipe_RP
+    p1
+    p2       
+    p3
+    p4
+    p5_RP
+    p6
+    p7
+    p8_RP
+    p9_RP
+    p10
+    p11
+    p12_RP
+    p13_RP
+    p14_RP
+    p15
+    p16
+    
+    eqbipuccout_pmr1                  
+    eqpuccoutU_pmr2a                    
+    eqpuccoutL_pmr2b                     
+    eqsumt_uc_pmr3a                      
+    eqfsmcnU_uc_pmr3b               
+    eqfsmcnL_uc_pmr3c                   
+    fsmc_uc_pmr4a                        
+    fsmc_uc_pmr4b                       
+    fsmc_uc_pmr4c                                
+    fsmc_uc_pmr4d
+    
+    eqbiplcout_pmr1                
+    eqplcoutU_pmr2a                  
+    eqplcoutL_pmr2b                  
+    eqsumt_l_pmr3a                        
+    eqfsmcnU_l_pmr3b             
+    eqfsmcnL_l_pmr3c                   
+    fsmc_l_pmr4a                          
+    fsmc_l_pmr4b                   
+    fsmc_l_pmr4c                            
+    fsmc_l_pmr4d
+    
+    fl_alpha_undetesti1
+    fl_alpha_undetesti2
+    fl_alpha_undetesti3
+    fl_alpha_undetesti4
+    fl_alpha_undetesti5
+    /;
+$onecho > Data_input.gms
+* ==================================Part 2: Data import======================
+*Sets
+* This part includes set and data definition,also includes hard bounds of Variables
+Sets
+    case /Ex1*Ex36/
+    r_   /1*10/  
+    u_   /1*20/
+    l_   /1*20/
+    j_   /1/
+    c_   /1*10/     
+    s_   /1*50/      
+    m_   /1*50/
+;
+*Problem Parameters of all cases
+
+Table Prc_all(case,r_,c_)
+                1       2       3       4       5       6
+    Ex1.1       0       0
+    Ex2.1       0       0
+    Ex3.1       0       0
+    Ex4.1       0       0       0
+    Ex5.1       0       0       0
+    Ex6.1       0       0       0
+    Ex7.1       0       0       0
+;
+
+#               1       2       3       4       5       6 
+Table PucinU_all(case,u_,c_)
+                1       2       3       4       5       6   
+    Ex1.1       0       0
+    Ex1.2       50      50
+    Ex2.1       0       0
+    Ex2.2       50      50
+    Ex2.3       50      50
+    Ex3.1       0       0
+    Ex3.2       50      50
+    Ex3.3       50      50
+    Ex3.4       50      50
+    
+    Ex4.1       0       0       0
+    Ex4.2       50      50      50
+    Ex4.3       50      50      50
+    Ex4.4       50      50      50
+    Ex4.5       25      25      25
+
+    Ex5.1       0       0       0
+    Ex5.2       50      40      15
+    Ex5.3       60      60      40
+
+    Ex6.1       0       0       0
+    Ex6.2       20      300     45
+    Ex6.3       120     20      200
+    Ex6.4       0       0       0
+    Ex6.5       50      400     60
+    
+    Ex7.1       0       0       0
+    Ex7.2       20      300     45
+    Ex7.3       120     20      200
+    Ex7.4       0       0       0
+    Ex7.5       50      400     60
+#               1       2       3       4       5       6 
+;
+
+Table Fucc_delta_all(case,u_,c_) #kg/h
+                1       2       3       4       5       6   
+    Ex1.1       1       1.5
+    Ex1.2       1       1
+    Ex2.1       1       1.5
+    Ex2.2       1       1
+    Ex2.3       1       1
+    Ex3.1       1       1.5
+    Ex3.2       1       1
+    Ex3.3       1       1
+    Ex3.4       2       2
+    
+    Ex4.1       1       1.5     1
+    Ex4.2       1       1       1
+    Ex4.3       1       1       1
+    Ex4.4       2       2       2
+    Ex4.5       1       1       0
+
+    Ex5.1       3       2.4     1.8  #注意单位换算
+    Ex5.2       4       3       3.6
+    Ex5.3       1.5     0.6     2
+
+    Ex6.1       0.75    20      1.75  #注意单位换算
+    Ex6.2       3.4     414.8   4.59
+    Ex6.3       5.6     1.4     520.8
+    Ex6.4       0.16    0.48    0.16
+    Ex6.5       0.8     60.8    0.48
+
+    Ex7.1       0.75    20      1.75  #注意单位换算
+    Ex7.2       3.4     414.8   4.59
+    Ex7.3       5.6     1.4     520.8
+    Ex7.4       0.16    0.48    0.16
+    Ex7.5       0.8     60.8    0.48
+#               1       2       3       4       5       6 
+
+Parameter PucinL_all(case,u_,c_), Pufcout_all(case,u_,c_);
+    PucinL_all(case,u_,c_) = 0; Pufcout_all(case,u_,c_) = 0;
+
+Table FucU_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10         
+    Ex1         40    50
+    Ex2         40    50     60
+    Ex3         40    50     60     70
+    Ex4         40    50     60     70     80
+    Ex5         30    40     20
+    Ex6         50    34     56     8      8
+    Ex7         50    34     56     8      8
+#               1     2      3      4      5      6      7      8      9      10 
+;   
+Table Fufin_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10    
+    Ex1
+;
+#               1     2      3      4      5      6      7      8      9      10  
+Table Fufout_all(case,u_) 
+                1     2      3      4      5      6      7      8      9      10    
+    Ex1                            
+;
+#               1     2      3      4      5      6      7      8      9      10  
+Table PjcU_all(case,j_,c_)
+            1    2    3      4      5      6    
+    Ex1.1   10   10
+    Ex2.1   10   10
+    Ex3.1   10   10
+    Ex4.1   10   10   10
+    Ex5.1   30   20   15
+    Ex6.1   20   5    100
+    Ex7.1   20   5    100
+;
+
+Table Rlc_all(case,l_,c_)
+            1      2      3      4      5      6
+    Ex1.1   0.95   0
+    Ex1.2   0      0.95
+    Ex2.1   0.95   0
+    Ex2.2   0.8    0.9
+    Ex2.3   0      0.95
+    Ex3.1   0.95   0
+    Ex3.2   0      0.90
+    Ex4.1   0.95   0      0
+    Ex4.2   0      0      0.95
+    Ex4.3   0      0.95   0
+    Ex5.1   0.7    0.8    0.85
+    Ex5.2   0.5    0.6    0.4
+    Ex6.1   0      0.999  0
+    Ex6.2   0.7    0.9    0.98
+    Ex6.3   0.95   0      0.5
+    Ex7.1   0      0.999  0
+    Ex7.2   0.7    0.9    0.98
+    Ex7.3   0.95   0      0.5
+#           1      2      3      4      5      6
+;   
+Table PlcinU_all(case,l_,c_) #输入规定的进口杂质浓度
+            1       2      3      4      5      6
+    Ex1.1   1E+5    1E+5
+    Ex1.2   1E+5    1E+5
+    Ex2.1   1E+5    1E+5
+    Ex2.2   1E+5    1E+5
+    Ex2.3   1E+5    1E+5
+    Ex3.1   1E+5    1E+5
+    Ex3.2   1E+5    1E+5
+    Ex3.3   1E+5    1E+5
+    Ex4.1   1E+5    1E+5   1E+5
+    Ex4.2   1E+5    1E+5   1E+5
+    Ex4.3   1E+5    1E+5   1E+5
+    Ex5.1   1E+5    1E+5   1E+5
+    Ex5.2   1E+5    1E+5   1E+5
+    Ex6.1   1E+6    1E+6   1E+6
+    Ex6.2   1E+6    1E+6   1E+6
+    Ex6.3   1E+6    1E+6   1E+6
+    Ex7.1   1E+6    1E+6   1E+6
+    Ex7.2   1E+6    1E+6   1E+6
+    Ex7.3   1E+6    1E+6   1E+6
+#           1       2      3      4      5      6
+;
+
+#----费用相关------
+Parameter H_all(case);
+    H_all('Ex2') = 8000;
+    H_all('Ex3') = 8000;
+    H_all('Ex4') = 8000;
+    H_all('Ex5') = 8600;
+    H_all('Ex6') = 8600;
+    H_all('Ex7') = 8600;
+Parameter Af_all(case);
+    Af_all('Ex2') = 0.1;
+    Af_all('Ex3') = 0.1;
+    Af_all('Ex4') = 0.1;
+    Af_all('Ex5') = 1/1.55;#10% ，3 year = 0.4021148 /,  Fan 1/1.55
+    Af_all('Ex6') = 1/1.55;#，0.1
+    Af_all('Ex7') = 0.1;
+    
+Table Cr_all(case,r_) '$/t'
+          1     2      3      4      5      6      7      8      9      10    
+    Ex2   1
+    Ex3   1
+    Ex4   1
+    Ex5   1
+    Ex6   1
+    Ex7   0.2 
+#         1     2      3      4      5      6      7      8      9      10
+    
+Table Alpha_all(case,l_)
+            1      2      3      4      5      6
+    Ex2     0.7    0.7    0.7
+    Ex3     0.7    0.7
+    Ex4     0.7    0.7    0.7
+    Ex5     0.7    0.7
+    Ex6     0.7    0.7    0.7
+    Ex7     0.7    0.7    0.7
+#           1      2      3      4      5      6
+; 
+Table OCl_all(case,l_)
+            1      2      3      4      5      6
+    Ex2     1      0.033  0.0067
+    Ex3     1      0.0067
+    Ex4     1      0.04   0.0067
+    Ex5     1      0.0067
+    Ex6     1      0.0067 0
+    Ex7     1      0.0067 0
+#           1      2      3      4      5      6
+;
+Table ICl_all(case,l_)
+            1      2      3      4      5      6
+    Ex2     16800  24000  12600
+    Ex3     16800  12600
+    Ex4     16800  9500   12600
+    Ex5     16800  12600
+    Ex6     16800  12600  4800
+    Ex7     16800  12600  4800
+#           1      2      3      4      5      6
+;
+Table D_pipe_all(case,s_,m_) 'distance from s to m, m'
+            1      2      3      4      5      6      7      8      9
+    Ex7.1   0      30     80     150    400    90     150    200    1200
+    Ex7.2   30     0      60     100    165    100    150    150    1000
+    Ex7.3   80     60     0      50     75     120    90     350    800
+    Ex7.4   150    100    50     0      150    250    170    400    650
+    Ex7.5   400    165    75     150    0      300    120    200    300
+    Ex7.6   90     100    120    250    300    0      125    80     250
+    Ex7.7   150    150    90     170    120    125    0      35     100
+    Ex7.8   200    150    350    400    200    80     35     0      100
+    Ex7.9   30     25     70     50     90     200    500    600    2000
+#           1      2      3      4      5      6      7      8      9
+;
+Parameter  Alpha_allin(case) /Ex1  1
+                            Ex2  0.7 
+                            Ex3  0.7    
+                            Ex4  0.7  
+                            Ex5  0.7 
+                            Ex6  0.7   
+                            Ex7  0.7    
+                           /
+;   
+$offecho
+$include Data_input
+
+#YObjfun = 1-新鲜水用量+水处理量, 2-总年化费用不包括管线,  3-总年化费用仅包括管线运行费, 4-总年化费用包括管线,
+*======================Step 0： 模型,数据和参数设置导入=====================
+#TWN.optfile = 1;
+#
+TWN.solprint = 2;
+#
+TWN_RP_PN.solprint = 2;
+#TWN_RP_PN_Abt.solprint = 2;
+#
+TWN_RP_PN_Abt.optfile = 2;#2对应的是模型的Abt属性文件，如果两个模型都使用1，则可能会造成一个属性文件包括不同的属性，会冲突
+Scalar
+    YGOstep1 'implement step 1 in GO or not' /0/,#默认没必要用，除非要执行边界紧缩或者上下定界模型交互
+    YGOstep2_3 'implement step 2&3 in GO or not' /1/
+    YGOstep4 'implement step 4(abt) in GO or not'/1/
+    Gap 'current gap' /+Inf/, Gap_tol 'Gap tolerance' /1E-3/
+    Dynamic_factor 'added partitions adjust factor '/0.1/#越大每轮增加的分割变量越少，等于1相当于大于均值的, 目前看取中小规模取0.1是最佳的，大和特大规模问题则建议取1，其实影响并不大，都取1就好
+    Gap_rp_tol  'rel_gap for RP'/0/#默认RP求到最优解 误差为0
+    NitermulU 'round upper bound for multistart'/1/#Step 1
+    NitergoU 'round upper bound for GO'/30/ #Step 2
+;
+#--- Data Setting for GO (Step 1)---
+Set itermul 'multistart total rounds'/1*1000/;
+Scalar Time_start_1,Time_start_2;
+#多起点停止辅助集合和参数
+Set sol_ /1*1000/;
+Set sol(sol_); sol(sol_) = no;
+Parameter
+    Objvalcou(sol_) '第sol局部解对应的目标值'
+    Freq(sol_)  '第sol局部解对应的出现次数'
+    Ysol_add  '判断是否增加了频数'
+;
+    Objvalcou(sol_) = 0;
+    Freq(sol_) = 0;  
+Set itermul_b '冒泡排序迭代轮次索引'/1*1000/;
+Scalar Aul '冒泡排序辅助参数';
+
+#--- Data Setting for GO (Step 2 and 3)---
+Sets
+    itergo 'iteration index for GO rounds'/1*100/
+    qp '分割点数总集合' /1*1001/
+    l_c_qp(l_,c_,qp) '不同plcout对应的分割点数'
+    uc_c_qp(u_,c_,qp) '不同puccout对应的分割点数'
+    l_qp(l_,qp)      '不同fl对应的分割点数'
+;
+Alias(qp_a, qp),(itergo_a,itergo);
+Scalar
+    LB 'current lower bound' /-1E+10/, UB 'current upper bound' /+1E+10/,
+    Epsilon_LB 'a small numeric value to avoid numeric problem'/1E-8/
+    Nd_dynamic 'added partitions per round'/1/
+    Ub_solve_switch_gap '切换原问题Dicopt求解方式的gap阈值' /1E-2/# 1%
+    Total_timeU '总求解时间上限,s' /3600/
+;
+    TWN_RP_PN.Reslim = 3600;#'RP求解时间上限,s'
+Parameter
+    Report_go(itergo, *)
+    Npmr_l_U(l_,c_) 'PMR_l 分割区间数'
+    Plcoutq_pmr(l_,c_,qp) 'PMR_l分割点浓度值'
+    Fsmc_l_devi(s_,m_,c_) 'devation of fsmc in RP'
+    Plcout_BLsum_devi(l_,c_) 'total devation of fsmc in RP about pclout'
+    Npmr_l_LSol(l_,c_) '下定界模型RP yplcout_pmr(l,c,np)解所在区间索引的值'
+    Plcout_LSol(l_,c_) '下定界模型Plcout(l,c)解'
+    
+    Npmr_uc_U(u_,c_) 'PMR_uc 分割区间数'
+    Puccoutq_pmr(u_,c_,qp) 'PMR_uc分割点浓度值'
+    Fsmc_devi(s_,m_,c_) 'devation of fsmc in RP'
+    Puccout_BLsum_devi(u_,c_) 'total devation of fsmc_uc in RP about pclout'
+    Npmr_uc_LSol(u_,c_) '下定界模型RP ypuccout_pmr(uc,c,np)解所在区间索引的值'
+    Puccout_LSol(u_,c_) '下定界模型Puccout(uc,c)解'
+
+    Npwu_l_U(l_) 'PWU_l 分割区间数'
+    Flq_pwu(l_,qp) 'PWU_l分割点浓度值'
+    Fl_alpha_devi(l_)   'devation of Fl_alpha'       
+    Fl_alpha_devi_Ave   'nonzero average of devation of Fl_alpha' 
+    Npwu_l_LSol(l_) '下定界模型RP yfl_pwu(l,np)解所在区间索引的值'
+    Fl_LSol(l_) '下定界模型Fl(l)解'
+    
+    Devi_BL_Ave '总的BL平均偏差值'
+    Devi_FLalpha_Ave '总的Fl**alpha平均偏差值'
+    Epsilon '非零临界小值' /1E-5/
+    
+    
+;
+#--- Data setting for GO (Step 4)---
+Sets
+    l_c_abt(l_,c_) 'candidate variables for  (l_,c_) abt'
+    uc_c_abt(u_,c_) 'candidate variables for  (uc_,c_) abt'
+    l_abt(l_) 'candidate variables for  (l_) abt'
+    iter_abt_pcout  'pcout执行abt的轮次索引(变量数)' /1*100/
+    iter_abt_fl  'fl执行abt的轮次索引(变量数)'/1*100/
+;
+Alias (l,l_b),(uc,uc_b),(c,c_b),(np,np_a);#边界紧缩中使用的索引
+Scalar
+    NiterabtU 'round upper bound for abt'/100/
+    Lo_partitionNum '统计平均分割区间数的阈值(不包括)'/3/#3
+    Ave_partiions_to_step4 'average partitions(bigger than Lo_partitionNum) to enter step 4'/5/#5
+    Total_partiions_to_step4  'total number of partitions for enter step 4'/100/#100
+    Count_bt 'Abt过程紧缩迭代更新的紧缩后子区间指针 1,2,...'
+    Interval 'Abt过程紧缩子区间指针'
+    Time_start_abt 'Abt起始时刻'#注意Abt是基于每轮itergo记录的总时长
+    Abt_Count '总紧缩求解次数' /0/
+    Npmax_abt '待紧缩变量中的最大分割区间数'#暂存值
+    Devimax_abt '待紧缩变量中，满足最大分割区间数下对应的最大偏差值'#暂存值
+    #
+    Test, AAA , BBB, CCC "Npmr_l_U",DDD "Npmr_l_USol", EEE "Npmr_l_LSol", FFF "current abt variable"
+;
+Parameter
+    Npmr_l_USol(l_,c_) '当前上界解对应的松弛模型所在子区间RPyplcout_pmr(l,c,np)解所在区间索引的值'
+    Npmr_uc_USol(u_,c_) '当前上界解对应的松弛模型所在子区间RP ypuccout_pmr(uc,c,np)解所在区间索引的值'
+    Npwu_l_USol(l_) '当前上界解对应的松弛模型所在子区间RP yfl(l,np)解所在区间索引的值'
+    Yplcout_pmr_Bt(l_,c_,np) '紧缩后plcout np 是否存在，如果还存在对应为1，否则为0'
+    Ypuccout_pmr_Bt(u_,c_,np) '紧缩后puccout np 是否存在，如果还存在对应为1，否则为0'
+    Yfl_pwu_Bt(l_,np) '紧缩后puccout np 是否存在，如果还存在对应为1，否则为0'
+    Npmr_l_U_temp(l_,c_) 'plcout PMR 分割区间数,暂存值'
+    Npmr_uc_U_temp(u_,c_) 'puccout PMR 分割区间数,暂存值'
+    Npwu_l_U_temp(l_) 'fl PWU 分割区间数,暂存值'
+;
+File bbcontrol /Gurobi.op2/;
+
+#Parameters for bound update and tighting
+Parameters
+    Caseindex '案例索引'
+    PlcoutUp_temp(l_,c_) 'PlcoutUp暂存值'
+    PlcoutLo_temp(l_,c_)'PlcoutLo暂存值'
+    PuccoutUp_temp(u_,c_) 'PuccoutUp暂存值'
+    PuccoutLo_temp(u_,c_) 'PuccoutLo暂存值'
+    FlUp_temp(l_) 'FlUp暂存值'
+    FlLo_temp(l_) 'FlLo暂存值'
+    FsmUp_temp(s_,m_) 'FsmUp暂存值'
+    FsmLo_temp(s_,m_)'FsmLo暂存值'
+;
+
+#Temp parameters
+Parameters
+    Temp0,Temp1(*),Temp2(*,*),Temp3(*,*,*);
+
+#
+loop(case$(ord(case)=4),
+#loop(case$(ord(case)>0 and ord(case)<8),
+    Caseindex = ord(case);
+    display '=================================================',Caseindex;
+    LB =-1E+10; UB =+1E+10;
+    #是否存在fl**alpha非线性
+    YNL_alpha$(Alpha_allin(case)>0 and Alpha_allin(case)<1) = 1;
+    YNL_alpha$(Alpha_allin(case)=1) = 0;
+    #优化目标选择
+    YObjfun$(ord(case)=1) = 1;
+    YObjfun$(ord(case)>1 and ord(case)<7) = 2;
+    YObjfun$(ord(case)=7) = 4;
+    
+    Yucflowratefixed$(ord(case)<5) = 1;
+    Yucflowratefixed$(ord(case)>=5) = 0;
+    
+    Ypipe_include$(ord(case)=7) = 1;
+    Ypipe_include$(ord(case)<7) = 0;
+    
+
+    
+    Yrecycled = 1;#0 = fl水量不受限
+    Yunitselfrecycled = 0;# 0 不允许单元循环
+    Yrl = 0;#默认不允许frt
+    
+    # extract domains for current problem(optional)
+    r(r_) =yes$((ord(r_) = 1) or (ord(r_) > 1 and sum(c_$Prc_all(case,r_,c_), 1)));#注意要合在一起写
+    l(l_) = sum(c_$Rlc_all(case,l_,c_), 1);
+    j(j_) = yes$((ord(j_) = 1) or (ord(j_) > 1 and sum(c_$PjcU_all(case,j_,c_), 1)));
+    uc(u_) = FucU_all(case,u_);
+    uf(u_) = Fufin_all(case,u_);
+    u(u_) = uc(u_) + uc(u_);#基于总流率上界判断合理
+    c(c_) = sum(u_$PucinU_all(case,u_,c_), 1);
+    s(s_) = yes$(ord(s_) <= card(r) + card(u) + card(l)); 
+    sc(s_) = yes$(s(s_) and ord(s_) <= card(uc));
+    sf(s_) = yes$(s(s_) and ord(s_) > card(uc) and ord(s_) <= card(u));
+    sl(s_) = yes$(s(s_) and ord(s_) > card(u) and ord(s_) <= card(u) + card(l));
+    sr(s_) = yes$(s(s_) and ord(s_) > card(u) + card(l));
+    m(m_) = yes$(ord(m_) <= card(u) + card(l) + card(j));
+    mu(m_) = yes$(m(m_) and ord(m_) <= card(u));
+    mc(m_) = yes$(m(m_) and ord(m_) <= card(uc));
+    mf(m_) = yes$(m(m_) and ord(m_) > card(uc) and ord(m_) <= card(u));
+    ml(m_) = yes$(m(m_) and ord(m_) > card(u) and ord(m_) <= card(u) + card(l));
+    mj(m_) = yes$(m(m_) and ord(m_) > card(u) + card(l));
+    #二维子集合指定映射关系
+    uout(u_,s_) =  yes$(u(u_) and (ord(s_) = ord(u_)));
+    lout(l_,s_) =  yes$(l(l_) and (ord(s_) = ord(l_) + card(u)));
+    rout(r_,s_) =  yes$(r(r_) and (ord(s_) = ord(r_) + card(u) + card(l)));
+    uin (m_,u_) =  yes$(u(u_) and (ord(m_) = ord(u_)));
+    lin (m_,l_) =  yes$(l(l_) and (ord(m_) = ord(l_) + card(u)));
+    jin (m_,j_) =  yes$(j(j_) and (ord(m_) = ord(j_) + card(u) + card(l)));
+    #sm子集合
+    ssm(s_,m_) = yes$((sc(s_) or sf(s_) or sl(s_)) and (mu(m_) + ml(m_)) and (ord(s_)=ord(m_)));#自循环的分支流股
+    #允许连接的流股集合
+    asm(s_,m_)$(1-Yunitselfrecycled and (1-Yrl)) = yes$(s(s_) and m(m_) and (not(sr(s_) and ml(m_))) and (not(sr(s_) and mj(m_)))
+                                                        and (not ssm(s_,m_)) #不允许自循环, 不包括frt
+                                                        );
+    asm(s_,m_)$(Yunitselfrecycled and (1-Yrl)) = yes$(s(s_) and m(m_) and (not(sr(s_) and ml(m_))) and (not(sr(s_) and mj(m_))));  
+
+    asm(s_,m_)$((1-Yunitselfrecycled) and Yrl) = yes$(s(s_) and m(m_) and (not(sr(s_) and mj(m_)))
+                                                      and (not ssm(s_,m_)) #包括frt,不允许自循环
+                                                     );
+    asm(s_,m_)$(Yunitselfrecycled and Yrl) = yes$(s(s_) and m(m_) and (not(sr(s_) and mj(m_)))); #包括frt,允许自循环
+       
+    #    display ssm, asm; 
+    # extract data(输入的边界值)
+    Prc(r,c) = Prc_all(case,r,c)*1E-3;#单位换算为10^3 ppm
+    PucinU(u,c) = PucinU_all(case,u,c)*1E-3;
+    PucinL(u,c) = PucinL_all(case,u,c)*1E-3;
+    FucU(uc) = FucU_all(case,uc);
+    Fucc_delta(uc,c) = Fucc_delta_all(case,uc,c);
+    PuccoutU(uc,c) = Fucc_delta(uc,c)/FucU(uc) + PucinU(uc,c);
+    #display Fucc_delta, FucU; 
+    #display PuccoutU; 
+    Fufin(uf) = Fufin_all(case,uf);
+    Fufout(uf) = Fufout_all(case,uf);
+    Pufcout(uf,c) = Pufcout_all(case,uf,c)*1E-3;
+    Rlc(l,c) = Rlc_all(case,l,c);  
+    PlcinU(l,c) = PlcinU_all(case,l,c)*1E-3;
+    PjcU(j,c) = PjcU_all(case,j,c)*1E-3;
+    D_pipe(s,m) = D_pipe_all(case,s,m);
+    #    display r, u, l, j, uc, uf, c, s, sc, sf, sl, sr, m, mu, mc, mf, ml, mj, uout, lout, rout, uin, lin, jin, ssm;
+    #display Prc, PucinU, PuccoutU, FucU, Fucc_delta, Fufin, Fufout, Pufcout, Rlc;
+    #display D_pipe; 
+    #费用参数输入
+    H = H_all(case);           
+    Af = Af_all(case);            
+    Alpha(l) = Alpha_all(case,l);       
+    Cr(r)= Cr_all(case,r);           
+    OCl(l) = OCl_all(case,l);          
+    ICl(l) = ICl_all(case,l);
+    #display H,Af,Alpha,Cr,OCl,ICl;
+#============ hard bound(同时考虑输入和拓扑结构推导)============
+    puccout.UP(uc,c) = PuccoutU(uc,c);
+    puccout.LO(uc,c) = Fucc_delta(uc,c)/FucU(uc);#这个很关键，因为直接参与BL项
+    #puccout.LO(uc,c) = 0; 
+    PlcinU(l,c) = min(PlcinU(l,c), max(smax(uf, Pufcout(uf,c)), smax(uc, PuccoutU(uc,c))));
+    plcout.UP(l,c) = (1 - Rlc(l,c))*PlcinU(l,c);
+     #plcout.LO(l,c) = 0;
+    FucL(uc)$Yucflowratefixed = FucU_all(case,uc);#固定用水单元uc水流率
+    FucL(uc)$(1-Yucflowratefixed) = 0;#不固定用水单元uc水流率
+    FucL(uc) = max(FucL(uc), smax(c, Fucc_delta(uc,c)/puccout.UP(uc,c)));   
+
+    fl.UP(l)$Yrecycled = Kloop*(sum(uf, Fufout(uf)) + sum(uc, FucU(uc)));#上界跟是否允许系统包括循环有关
+    fl.UP(l)$(1-Yrecycled) = sum(uf, Fufout(uf)) + sum(uc, FucU(uc));#上界跟是否允许系统包括循环有关
+    
+    fsm.UP(sr,ml)$asm(sr,ml) = sum(uf, Fufout(uf)) + sum(uc, FucU(uc));
+    fsm.UP(sr,mc)$asm(sr,mc) = sum(uc$uin(mc,uc), FucU(uc));
+    fsm.UP(sr,mf)$asm(sr,mf) = sum(uf$uin(mf,uf), Fufin(uf));
+    
+    fsm.UP(sf,mc)$asm(sf,mc) = min(sum(uf$uout(uf,sf), Fufout(uf)), sum(uc$uin(mc,uc), FucU(uc)));
+    fsm.UP(sf,mf)$asm(sf,mf) = min(sum(ufa$uout(ufa,sf), Fufout(ufa)), sum(uf$uin(mf,uf), Fufin(uf)));
+    fsm.UP(sf,ml)$asm(sf,ml) = sum(uf$uout(uf,sf), Fufout(uf));
+    fsm.UP(sf,mj)$asm(sf,mj) = sum(uf$uout(uf,sf), Fufout(uf));
+    
+*    fsm.UP(sc,mc)$asm(sc,mc) = min(sum(uca$uout(uca,sc), FucU(uca)), sum(uc$uin(mc,uc), FucU(uc)));
+*    fsm.UP(sc,mf)$asm(sc,mf) = min(sum(uc$uout(uc,sc), FucU(uc)), sum(uf$uin(mf,uf), Fufin(uf)));
+*    fsm.UP(sc,ml)$asm(sc,ml) = sum(uc$uout(uc,sc), FucU(uc));
+*    fsm.UP(sc,mj)$asm(sc,mj) = sum(uc$uout(uc,sc), FucU(uc));
+
+    fsm.Up(sc,mj)$asm(sc,mj) = min(sum(uc$uout(uc,sc), FucU(uc)),
+                                   sum(j$jin(mj,j), (sum(uf, Fufout(uf)) + sum(uc, FucU(uc)))*smin(c, PjcU(j,c)/max(PjcU(j,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c)))))
+                               );                         
+    loop((sc,mf)$asm(sc,mf),
+        if(sum(uf$uin(mf,uf), smin(c, max(PucinU(uf,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c))))) = 0,
+            fsm.Up(sc,mf) = min(sum(uc$uout(uc,sc), FucU(uc)),sum(uf$uin(mf,uf), Fufin(uf)));
+        else
+            fsm.Up(sc,mf) = min(sum(uc$uout(uc,sc), FucU(uc)),
+                                sum(uf$uin(mf,uf), Fufin(uf)*smin(c, PucinU(uf,c)/max(PucinU(uf,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c)))))
+                            );        
+        );
+    );
+    loop((sc,mc)$asm(sc,mc),
+        if(sum(uc$uin(mc,uc), smin(c, max(PucinU(uc,c), sum(uca$uout(uca,sc), puccout.Lo(uca,c))))) = 0,
+            fsm.Up(sc,mc) = min(sum(uca$uout(uca,sc), FucU(uca)),sum(uc$uin(mc,uc), FucU(uc)));    
+        else
+            fsm.Up(sc,mc) = min(sum(uca$uout(uca,sc), FucU(uca)),
+                                sum(uc$uin(mc,uc), FucU(uc)*smin(c, PucinU(uc,c)/max(PucinU(uc,c), sum(uca$uout(uca,sc), puccout.Lo(uca,c)))))
+                            );      
+        );
+    );                     
+    loop((sc,ml)$asm(sc,ml),
+        if(sum(l$lin(ml,l), smin(c, max(PlcinU(l,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c))))) = 0,
+            fsm.Up(sc,ml)= min(sum(uc$uout(uc,sc), FucU(uc)), sum(l$lin(ml,l), fl.UP(l)));
+        else
+            fsm.Up(sc,ml) = min(sum(uc$uout(uc,sc), FucU(uc)),
+                                sum(l$lin(ml,l), fl.UP(l)*smin(c, PlcinU(l,c)/max(PlcinU(l,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c)))))
+                            );  
+        );
+    );
+    
+*    fsm.Up(sc,mf)$asm(sc,mf) = min(sum(uc$uout(uc,sc), FucU(uc)),
+*                                   sum(uf$uin(mf,uf), Fufin(uf)*smin(c, PucinU(uf,c)/max(PucinU(uf,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c)))))
+*                               );
+*    fsm.Up(sc,mc)$asm(sc,mc) = min(sum(uca$uout(uca,sc), FucU(uca)),
+*                                   sum(uc$uin(mc,uc), FucU(uc)*smin(c, PucinU(uc,c)/max(PucinU(uc,c), sum(uca$uout(uca,sc), puccout.Lo(uca,c)))))
+*                               );   
+*    fsm.Up(sc,ml)$asm(sc,ml) = min(sum(uc$uout(uc,sc), FucU(uc)),
+*                                   sum(l$lin(ml,l), fl.UP(l)*smin(c, PlcinU(l,c)/max(PlcinU(l,c), sum(uc$uout(uc,sc), puccout.Lo(uc,c)))))
+*                               );
+                    
+    #初始fsm(sl,m)相关的边界无法基于plout下界紧缩，因为其等于0
+    fsm.UP(sl,mj)$asm(sl,mj) = sum(uf, Fufout(uf)) + sum(uc, FucU(uc));
+    fsm.UP(sl,ml)$asm(sl,ml) = sum(uf, Fufout(uf)) + sum(uc, FucU(uc)); 
+    fsm.UP(sl,mc)$asm(sl,mc) = sum(uc$uin(mc,uc), FucU(uc));
+    fsm.UP(sl,mf)$asm(sl,mf) = sum(uf$uin(mf,uf), Fufin(uf));
+
+    fsm.UP(s_,m_)$(asm(s_,m_) and (ord(s_)=ord(m_)) and (sl(s_) and ml(m_)) and Yunitselfrecycled) = Kloop*(sum(uf, Fufout(uf)) + sum(uc, FucU(uc)));#FL循环流股水量限制
+
+    #display FucU, fsm.UP, fl.UP; 
+    #display PlcinU, plcout.UP, plcout.LO, FucU, FucL;
+    #display fsm.UP, PucinU, PucinL, puccout.UP, puccout.LO;
+
+   
+    #针对算例7的打断循环结构操作(基于结果逐步打断)
+*    fsm.UP('8','7') = 0;#l3-l2
+*    fsm.UP('7','3') = 0; #l2-uc3   
+*    fsm.UP('7','2') = 0; #l2-uc2
+*    
+*    fsm.UP('8','3') = 0; #l2-uc3   
+*    fsm.UP('8','2') = 0; #l2-uc2
+*    
+*    fsm.UP('6','2') = 0; #l2-uc2
+*    fsm.UP('6','2') = 0; #l2-uc2
+*    
+*    fsm.UP('3','2') = 0; #uc3-uc2   
+    
+
+    #======================== Global optimization algorithm ================================
+    #---------------------------------------------------------------------------------------
+    #------------------------ GO-Step 1：multistart local optimization ---------------------
+    #---------------------------------------------------------------------------------------
+    Time_start_1 = timeExec;
+    if(YGOstep1,
+        loop(itermul$(ord(itermul)<=NitermulU),
+            puccout.L(uc,c) = uniform(puccout.Lo(uc,c), puccout.Up(uc,c));
+            plcout.L(l,c) = uniform(plcout.Lo(l,c), plcout.Up(l,c));
+            fsm.L(s,m)$asm(s,m) = uniform(fsm.Lo(s,m), fsm.Up(s,m));
+            fl.L(l) = uniform(fl.Lo(l), fl.Up(l));
+            ysm.L(s,m)$(asm(s,m) and Ypipe_include) = uniform(0, 1);#dicopt首先解的是rMINLP问题
+            #TWN.solprint = 2;
+            solve TWN using MINLP minimizing objval     
+            #Report_mul(itermul,'NLP_stat')= TWN.modelstat;
+            #Report_mul(itermul,'Solving_Time') = TWN.ResUsd;
+            if(TWN.modelstat = 1 or TWN.modelstat = 2 or TWN.modelstat = 7 or TWN.modelstat = 8,
+                Report_mul(itermul,'Objval_local')= objval.L;
+                #------------step 1.1:对局部解进行统计----
+                Ysol_add = 0;
+                loop(sol,
+                    if(abs(objval.L - Objvalcou(sol))<1E-3,#如果没发现新解
+                        Freq(sol) = Freq(sol) + 1;
+                        Ysol_add = 1;
+                    );
+                );
+                if(Ysol_add = 0, #如果发现新的局部解
+                    sol(sol_)$(ord(sol_) = (card(sol)+1)) = yes;
+                    Objvalcou(sol_)$(ord(sol_) = card(sol)) = objval.L;
+                    Freq(sol_)$(ord(sol_) = card(sol)) = 1; 
+                );
+                #display sol, Objvalcou, Freq;
+                
+                #------------step 1.2：更新最优解--------- 
+                if(objval.L < UB,#更新最优解
+                    UB = objval.L; 
+                    Fsm_USol(s,m) = fsm.L(s,m);   
+                    Fl_USol(l) = sum((sl,m)$lout(l,sl), fsm.L(sl,m));
+                    Plcout_USol(l,c)$(Fl_USol(l)>0) = plcout.L(l,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算
+                    Fuc_USol(uc) = sum((sc,m)$uout(uc,sc), fsm.L(sc,m));
+                    Puccin_USol(uc,c)$(Fuc_USol(uc)>0) = (puccout.L(uc,c) - Fucc_delta(uc,c)/Fuc_USol(uc))*1E+3; 
+                    Puccout_USol(uc,c)$(Fuc_USol(uc)>0) = puccout.L(uc,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算
+                    Fj_USol(j) = sum((uf,sf,mj)$(uout(uf,sf) and jin(mj,j)), fsm.L(sf,mj))
+                               + sum((uc,sc,mj)$(uout(uc,sc) and jin(mj,j)), fsm.L(sc,mj))
+                               + sum((l,sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj))
+                               ;
+                    Pjc_USol(j,c) = (sum((uf,sf,mj)$(uout(uf,sf) and jin(mj,j)), fsm.L(sf,mj)*Pufcout(uf,c))
+                                  + sum((uc,sc,mj)$(uout(uc,sc) and jin(mj,j)), fsm.L(sc,mj)*puccout.L(uc,c))
+                                  + sum((l,sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj)*plcout.L(l,c)))/Fj_USol(j)*1E+3;
+                    Fru_USol(r,u) = sum((sr,mu)$(rout(r,sr) and uin(mu,u)), fsm.L(sr,mu)); 
+                    Fuu_USol(u,ua) = sum((s,mu)$(uout(u,s) and uin(mu,ua)), fsm.L(s,mu)); 
+                    Ful_USol(u,l) = sum((s,ml)$(uout(u,s) and lin(ml,l)), fsm.L(s,ml)); 
+                    Fuj_USol(u,j) = sum((s,mj)$(uout(u,s) and jin(mj,j)), fsm.L(s,mj)); 
+                    Flu_USol(l,u) = sum((sl,mu)$(lout(l,sl) and uin(mu,u)), fsm.L(sl,mu));
+                    Fll_USol(l,la) = sum((sl,ml)$(lout(l,sl) and lin(ml,la)), fsm.L(sl,ml));
+                    Flj_USol(l,j)= sum((sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj));                       
+                );
+            else
+                Report_mul(itermul,'Objval_local')= +INF;     
+            );
+        );
+        #------------step 1.3: 统计结果重新排序(冒泡）---------
+        loop(itermul_b$(ord(itermul_b) <= (card(sol)-1)),#一共执行N-1轮迭代
+            loop(sol_$(ord(sol_) <= (card(sol) - ord(itermul_b))),
+                if(Objvalcou(sol_) > Objvalcou(sol_+1),#两两交换，从前到后执行,小的放前面,第itermul轮，执行N-itermul次
+                    Aul = Objvalcou(sol_);
+                    Objvalcou(sol_) = Objvalcou(sol_+1);
+                    Objvalcou(sol_+1) = Aul;
+                    Aul = Freq(sol_);
+                    Freq(sol_) = Freq(sol_+1);
+                    Freq(sol_+1) = Aul;
+                );
+            );
+        );
+        #display "======================================step 1: Result display =====================================";
+        #display sol, Objvalcou, Freq;#这块得加个冒泡排序，而且发现个规律，越接近全局最优解的，出现的频数越高，证明了方法的有效性！！！就是该方法很大概率发现近最优解
+        #display 'Current solutions:',UB, Fsm_USol, Fuc_USol, Puccin_USol, Puccout_USol, Fl_USol, Plcout_USol, Fj_USol, Pjc_USol, Fucc_delta;
+        #display Fru_USol, Fuu_USol, Ful_USol, Fuj_USol, Flu_USol, Fll_USol, Flj_USol;
+        #display puccout.UP,puccout.LO,Puccout_USol, plcout.UP, plcout.LO,Plcout_USol;
+        Report(case,'Time1') = timeExec-Time_start_1;
+    );
+    #求解非分割RP
+    #Solve TWN_RP_P1 using MIP minimizing objval;
+    #---全均匀分割---
+$ontext
+    Npmr_l_U(l,c) = 400;
+    Npmr_uc_U(uc,c)$(puccout.Up(uc,c)-puccout.LO(uc,c)=0) = 1;
+    l_c_np(l,c,np) = yes$(ord(np) <= Npmr_l_U(l,c));
+    l_c_qp(l,c,qp) = yes$(ord(qp) <= (Npmr_l_U(l,c)+1));
+    Plcoutq_pmr(l,c,qp)$l_c_qp(l,c,qp) = plcout.Lo(l,c)+(plcout.Up(l,c)-plcout.LO(l,c))/Npmr_l_U(l,c)*(ord(qp) - 1);   
+    PlcoutnUp_pmr(l,c,np)$l_c_np(l,c,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Plcoutq_pmr(l,c,qp));
+    PlcoutnLo_pmr(l,c,np)$l_c_np(l,c,np) = sum(qp$(ord(qp) = ord(np)), Plcoutq_pmr(l,c,qp));
+    display l_c_np, PlcoutnUp_pmr, PlcoutnLo_pmr;
+    Npmr_uc_U(uc,c) = 400;
+    uc_c_np(uc,c,np) = yes$(ord(np) <= Npmr_uc_U(uc,c));
+    uc_c_qp(uc,c,qp) = yes$(ord(qp) <= (Npmr_uc_U(uc,c)+1));
+    Puccoutq_pmr(uc,c,qp)$uc_c_qp(uc,c,qp) = puccout.Lo(uc,c)+(puccout.Up(uc,c)-puccout.LO(uc,c))/Npmr_uc_U(uc,c)*(ord(qp) - 1);   
+    PuccoutnUp_pmr(uc,c,np)$uc_c_np(uc,c,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Puccoutq_pmr(uc,c,qp));
+    PuccoutnLo_pmr(uc,c,np)$uc_c_np(uc,c,np) = sum(qp$(ord(qp) = ord(np)), Puccoutq_pmr(uc,c,qp));
+    display uc_c_np, PuccoutnUp_pmr, PuccoutnLo_pmr;
+    Npwu_l_U(l) = 400;
+    l_np(l,np) = yes$(ord(np) <= Npwu_l_U(l));
+    l_qp(l,qp) = yes$(ord(qp) <= (Npwu_l_U(l)+1));
+    Flq_pwu(l,qp)$l_qp(l,qp) = fl.Lo(l)+(fl.Up(l)-fl.Lo(l))/Npwu_l_U(l)*(ord(qp) - 1);   
+    FlnUp_pwu(l,np)$l_np(l,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Flq_pwu(l,qp));
+    FlnLo_pwu(l,np)$l_np(l,np) = sum(qp$(ord(qp) = ord(np)), Flq_pwu(l,qp));
+    Fl_Slope_pwu(l,np)$l_np(l,np) = (FlnUp_pwu(l,np)**Alpha(l)-FlnLo_pwu(l,np)**Alpha(l))/(FlnUp_pwu(l,np)-FlnLo_pwu(l,np)); 
+    Fl_Intercept_pwu(l,np)$l_np(l,np) = FlnLo_pwu(l,np)**Alpha(l) - Fl_Slope_pwu(l,np)*FlnLo_pwu(l,np);
+    display l_np, FlnUp_pwu, FlnLo_pwu, Fl_Slope_pwu, Fl_Intercept_pwu;  
+$offtext   
+    Time_start_2 = timeExec;
+    if(YGOstep2_3,
+        #先基于当前UB解初始化RP,在基于LB解初始化P,不断迭代，暂时不考虑松弛原问题二元变量和边界紧缩部分---暂未执行
+        loop(itergo$(ord(itergo)<=NitergoU),
+        #---------------------------------------------------------------------------------------
+        #------------------------ GO-Step 2：solve RP, P and update results --------------------
+        #---------------------------------------------------------------------------------------
+            #---LBsolve&renew---
+            if(ord(itergo)=1, #Initialization
+                Npmr_l_U(l,c) = 1; 
+                l_c_np(l,c,np) = yes$(ord(np) <= Npmr_l_U(l,c));
+                l_c_qp(l,c,qp) = yes$(ord(qp) <= (Npmr_l_U(l,c)+1));
+                Plcoutq_pmr(l,c,'1') = plcout.Lo(l,c);
+                Plcoutq_pmr(l,c,'2') = plcout.Up(l,c);   
+                PlcoutnUp_pmr(l,c,np)$l_c_np(l,c,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Plcoutq_pmr(l,c,qp));
+                PlcoutnLo_pmr(l,c,np)$l_c_np(l,c,np) = sum(qp$(ord(qp) = ord(np)), Plcoutq_pmr(l,c,qp));
+                
+                Npmr_uc_U(uc,c) = 1;
+                uc_c_np(uc,c,np) = yes$(ord(np) <= Npmr_uc_U(uc,c));
+                uc_c_qp(uc,c,qp) = yes$(ord(qp) <= (Npmr_uc_U(uc,c)+1));
+                Puccoutq_pmr(uc,c,'1') = puccout.Lo(uc,c);
+                Puccoutq_pmr(uc,c,'2') = puccout.Up(uc,c);                  
+                PuccoutnUp_pmr(uc,c,np)$uc_c_np(uc,c,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Puccoutq_pmr(uc,c,qp));
+                PuccoutnLo_pmr(uc,c,np)$uc_c_np(uc,c,np) = sum(qp$(ord(qp) = ord(np)), Puccoutq_pmr(uc,c,qp));                
+
+                Npwu_l_U(l) = 1;
+                l_np(l,np) = yes$(ord(np) <= Npwu_l_U(l));
+                l_qp(l,qp) = yes$(ord(qp) <= (Npwu_l_U(l)+1));
+                Flq_pwu(l,'1') = fl.Lo(l);
+                Flq_pwu(l,'2') = fl.Up(l);                 
+                FlnUp_pwu(l,np)$l_np(l,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Flq_pwu(l,qp));
+                FlnLo_pwu(l,np)$l_np(l,np) = sum(qp$(ord(qp) = ord(np)), Flq_pwu(l,qp));
+                Fl_Slope_pwu(l,np)$l_np(l,np) = (FlnUp_pwu(l,np)**Alpha(l)-FlnLo_pwu(l,np)**Alpha(l))/(FlnUp_pwu(l,np)-FlnLo_pwu(l,np)); 
+                Fl_Intercept_pwu(l,np)$l_np(l,np) = FlnLo_pwu(l,np)**Alpha(l) - Fl_Slope_pwu(l,np)*FlnLo_pwu(l,np);
+            );
+            #display l_c_np, PlcoutnUp_pmr, PlcoutnLo_pmr;
+            TWN_RP_PN.optcr = Gap_rp_tol;
+            Solve TWN_RP_PN using MIP minimizing objval;    
+            #如果松弛模型的求解时间超时，则跳过GO，只统计上轮的迭代结果即可
+            if(TWN_RP_PN.ResUsd>=TWN_RP_PN.Reslim, break;);
+            if((TWN_RP_PN.modelstat =1 or TWN_RP_PN.modelstat =8) and (objval.l >= (LB - Epsilon_LB )),
+                LB = objval.l;
+                if(ord(itergo)=1, Report(case,'Root') = LB;);
+                #Npmr_l_LSol(l,c) = sum(np$(yplcout_pmr.L(l,c,np)>Epsilon and l_c_np(l,c,np)), ord(np));#这个有数值问题
+                Plcout_LSol(l,c) = plcout.L(l,c);
+                Puccout_LSol(uc,c) = puccout.L(uc,c);
+                Fl_LSol(l) = fl.L(l);                           
+                Npmr_l_LSol(l,c) = sum(np$(round(yplcout_pmr.L(l,c,np)) and l_c_np(l,c,np)), ord(np));#round避免数值问题
+                Npmr_uc_LSol(uc,c) = sum(np$(round(ypuccout_pmr.L(uc,c,np)) and uc_c_np(uc,c,np)), ord(np));
+                Npwu_l_LSol(l) = sum(np$(round(yfl_pwu.L(l,np)) and l_np(l,np)), ord(np));
+            );
+            #display  Npmr_l_LSol,Npmr_uc_LSol, Npwu_l_LSol, yplcout_pmr.L; 
+            #bi_pn.l(l,c,np) = 0;#对于变量域变化的，先清零，否则影响后续的参数赋值
+            #---Calculate auxiliary parameters
+            Fsmc_devi(sl,m,c)$asm(sl,m) = abs(fsmc.L(sl,m,c) - sum(l$lout(l,sl), plcout.L(l,c))*fsm.L(sl,m));
+            Fsmc_devi(sc,m,c)$asm(sc,m) = abs(fsmc.L(sc,m,c) - sum(uc$uout(uc,sc), puccout.L(uc,c))*fsm.L(sc,m));            
+            #display fsmc.L, plcout.L, fsm.L;
+            
+            Plcout_BLsum_devi(l,c) = 0$(sum((sl,m)$(asm(sl,m) and lout(l,sl)), Fsmc_devi(sl,m,c))<=Epsilon)
+                                     +(sum((sl,m)$(asm(sl,m) and lout(l,sl)), Fsmc_devi(sl,m,c)))$(sum((sl,m)$(asm(sl,m) and lout(l,sl)), Fsmc_devi(sl,m,c))>Epsilon);
+            
+            Puccout_BLsum_devi(uc,c) = 0$(sum((sc,m)$(asm(sc,m) and uout(uc,sc)), Fsmc_devi(sc,m,c))<=Epsilon)
+                                       + sum((sc,m)$(asm(sc,m) and uout(uc,sc)), Fsmc_devi(sc,m,c))$(sum((sc,m)$(asm(sc,m) and uout(uc,sc)), Fsmc_devi(sc,m,c))>Epsilon);
+            display "------------"Plcout_BLsum_devi,Puccout_BLsum_devi;            
+            Fl_alpha_devi(l)$YNL_alpha = 0$(abs(fl_alpha.L(l)-fl.L(l)**Alpha(l))<=Epsilon)
+                                         +(abs(fl_alpha.L(l)-fl.L(l)**Alpha(l)))$(abs(fl_alpha.L(l)-fl.L(l)**Alpha(l))>Epsilon);            
+
+
+            if(YNL_alpha  and sum(l, Fl_alpha_devi(l)) = 0,
+                Fl_alpha_devi_Ave = 0;
+            elseif YNL_alpha  and sum(l, Fl_alpha_devi(l)) > 0, 
+                Fl_alpha_devi_Ave =  sum(l, Fl_alpha_devi(l))/sum(l$(Fl_alpha_devi(l)>0), 1);
+            );            
+            #display Fl_alpha_devi, Fl_alpha_devi_Ave;
+            display Fl_alpha_devi;            
+            #计算 总体的偏差平均值 Plcout_BLsum_devi(l,c), Puccout_BLsum_devi(uc,c), Fl_alpha_devi(l), (>0部分)
+            Devi_BL_Ave = 0$(not (sum((l,c), Plcout_BLsum_devi(l,c)) + sum((uc,c), Puccout_BLsum_devi(uc,c))))
+                          + ((sum((l,c), Plcout_BLsum_devi(l,c)) + sum((uc,c), Puccout_BLsum_devi(uc,c)))/
+                          (sum((l,c)$Plcout_BLsum_devi(l,c), 1) + sum((uc,c)$Puccout_BLsum_devi(uc,c), 1)))$(sum((l,c), Plcout_BLsum_devi(l,c)) + sum((uc,c), Puccout_BLsum_devi(uc,c)));
+            Devi_FLalpha_Ave = 0$(not sum(l, Fl_alpha_devi(l)))
+                              + (sum(l, Fl_alpha_devi(l))/sum(l$Fl_alpha_devi(l), 1))$sum(l, Fl_alpha_devi(l));
+            #display Devi_BL_Ave, Devi_FLalpha_Ave;
+
+
+            #---UBsolve&renew---
+            Solve TWN using MINLP minimizing objval;
+            if((TWN.modelstat = 1 or TWN.modelstat = 2 or TWN.modelstat = 7 or TWN.modelstat = 8) and (objval.L < UB),#更新最优解
+                UB = objval.L; 
+                Fsm_USol(s,m) = fsm.L(s,m);   
+                Fl_USol(l) = sum((sl,m)$lout(l,sl), fsm.L(sl,m));
+                Plcout_USol(l,c)$(Fl_USol(l)>0) = plcout.L(l,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算
+                Fuc_USol(uc) = sum((sc,m)$uout(uc,sc), fsm.L(sc,m));
+                Puccin_USol(uc,c)$(Fuc_USol(uc)>0) = (puccout.L(uc,c) - Fucc_delta(uc,c)/Fuc_USol(uc))*1E+3; 
+                Puccout_USol(uc,c)$(Fuc_USol(uc)>0) = puccout.L(uc,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算
+                Fj_USol(j) = sum((uf,sf,mj)$(uout(uf,sf) and jin(mj,j)), fsm.L(sf,mj))
+                           + sum((uc,sc,mj)$(uout(uc,sc) and jin(mj,j)), fsm.L(sc,mj))
+                           + sum((l,sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj))
+                           ;
+                Pjc_USol(j,c) = (sum((uf,sf,mj)$(uout(uf,sf) and jin(mj,j)), fsm.L(sf,mj)*Pufcout(uf,c))
+                              + sum((uc,sc,mj)$(uout(uc,sc) and jin(mj,j)), fsm.L(sc,mj)*puccout.L(uc,c))
+                              + sum((l,sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj)*plcout.L(l,c)))/Fj_USol(j)*1E+3;
+                Fru_USol(r,u) = sum((sr,mu)$(rout(r,sr) and uin(mu,u)), fsm.L(sr,mu)); 
+                Fuu_USol(u,ua) = sum((s,mu)$(uout(u,s) and uin(mu,ua)), fsm.L(s,mu)); 
+                Ful_USol(u,l) = sum((s,ml)$(uout(u,s) and lin(ml,l)), fsm.L(s,ml)); 
+                Fuj_USol(u,j) = sum((s,mj)$(uout(u,s) and jin(mj,j)), fsm.L(s,mj)); 
+                Flu_USol(l,u) = sum((sl,mu)$(lout(l,sl) and uin(mu,u)), fsm.L(sl,mu));
+                Fll_USol(l,la) = sum((sl,ml)$(lout(l,sl) and lin(ml,la)), fsm.L(sl,ml));
+                Flj_USol(l,j)= sum((sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj)); 
+            );
+            #更新上界解所在RP的子区间
+            Npmr_l_USol(l,c) = sum(np$(PlcoutnUp_pmr(l,c,np) >= Plcout_USol(l,c)*1E-3 and PlcoutnLo_pmr(l,c,np) <= Plcout_USol(l,c)*1E-3 and l_c_np(l,c,np)), ord(np));
+            Npmr_uc_USol(uc,c) = sum(np$(PuccoutnUp_pmr(uc,c,np) >= Puccout_USol(uc,c)*1E-3 and PuccoutnLo_pmr(uc,c,np) <= Puccout_USol(uc,c)*1E-3 and uc_c_np(uc,c,np)), ord(np));
+            Npwu_l_USol(l) = sum(np$(FlnUp_pwu(l,np) >= Fl_USol(l)*1E-3 and FlnLo_pwu(l,np) <= Fl_USol(l)*1E-3 and l_np(l,np)), ord(np));
+            #---Result and gap update and optimilaty check---
+            Gap=abs((UB-LB)/UB);
+            Report_go(itergo, 'LB') = LB;
+            Report_go(itergo, 'UB') = UB;
+            Report_go(itergo, 'Gap') = Gap;
+            Report_go(itergo, 'Partitions') = sum((l,c), Npmr_l_U(l,c))+sum((uc,c), Npmr_uc_U(uc,c))+sum(l, Npwu_l_U(l));                                 
+            Report_go(itergo, 'Time_RP') = TWN_RP_PN.ResUsd;
+            Report_go(itergo, 'Time_P') = TWN.ResUsd;
+            Report_go(itergo, 'TotTime_P+RP') = sum(itergo_a$(ord(itergo_a)<=ord(itergo)),Report_go(itergo_a, 'Time_RP')+Report_go(itergo_a, 'Time_P'));
+            if(Gap <= Gap_Tol, #是否满足gap
+                #display '============================================================================================================================'
+                display 'the global optimal soution is found!';
+                display UB, Fsm_USol, Fuc_USol, Puccin_USol, Puccout_USol, Fl_USol, Plcout_USol, Fj_USol, Pjc_USol, Fucc_delta;
+                display Fru_USol, Fuu_USol, Ful_USol, Fuj_USol, Flu_USol, Fll_USol, Flj_USol;
+                #display '=============================================================================================================================';
+                #display  Npmr_l_U;
+                TWN.optfile = 0;#还原
+                putclose bbcontrol 'mipstopexpr resusd >= 10000000';#还原
+                TWN_RP_PN_Abt.optfile = 0;#还原
+                break;#可以跳出多层循环
+            elseif timeExec-Time_start_1 >Total_timeU,#最大求解时间达到
+                #display '============================================================================================================================';
+                display 'maximum total time is reached!';
+                #display  Npmr_l_U; 
+                TWN.optfile = 0;#还原
+                putclose bbcontrol 'mipstopexpr resusd >= 10000000';#还原
+                TWN_RP_PN_Abt.optfile = 0;#还原
+                break;#可以跳出多层循环
+            );
+            
+
+            #---------------------------------------------------------------------------------------
+            #------------------------ GO-Step 4：Adaptive bounds contraction  ----------------------
+            #---------------------------------------------------------------------------------------
+            
+            Time_start_abt = timeExec;
+            if(YGOstep4,
+                #执行Abt的条件基于大于临近分割区间的区间数平均值以及总的分割区间数
+                #每轮GO紧缩对应的UB是不变的,所以不用每次紧缩都更新，而是每轮GO
+                if(sum((l_b,c_b)$(Npmr_l_U(l_b,c_b)>Lo_partitionNum), Npmr_l_U(l_b,c_b)) +
+                   sum((uc_b,c_b)$(Npmr_uc_U(uc_b,c_b)>Lo_partitionNum), Npmr_uc_U(uc_b,c_b)) +
+                   sum(l_b$(Npwu_l_U(l_b)>Lo_partitionNum), Npwu_l_U(l_b)) 
+                   >= Ave_partiions_to_step4*(sum((l_b,c_b)$(Npmr_l_U(l_b,c_b)>Lo_partitionNum), 1) +
+                   sum((uc_b,c_b)$(Npmr_uc_U(uc_b,c_b)>Lo_partitionNum), 1) +
+                   sum(l_b$(Npwu_l_U(l_b)>Lo_partitionNum), 1))
+                   and (sum((l_b,c_b)$(Npmr_l_U(l_b,c_b)>Lo_partitionNum), 1) +
+                        sum((uc_b,c_b)$(Npmr_uc_U(uc_b,c_b)>Lo_partitionNum), 1) +
+                        sum(l_b$(Npwu_l_U(l_b)>Lo_partitionNum), 1) > 0)
+                   and (sum((l_b,c_b), Npmr_l_U(l_b,c_b))+sum((uc_b,c_b), Npmr_uc_U(uc_b,c_b))+sum(l_b, Npwu_l_U(l_b)) 
+                        >= Total_partiions_to_step4)                   
+                   #and ord(itergo) = 8
+                   ,
+                    putclose bbcontrol 'mipstopexpr objest > ' (round(Ub,5)+0.00001):0:5 ' || objval < ' (round(Ub,5)-0.00001):0:5;#圆整会出现舍去的情况，为保证参考值合理，额外加一个小值                   
+                    #display Npmr_l_U, Npmr_l_USol, Npmr_l_LSol, Plcoutq_pmr; 
+                    #------------ Step4-1 ---------------
+                    #基于当前分割区间数初始化候选紧缩的集合
+                    l_c_abt(l_b,c_b)$(Npmr_l_U(l_b,c_b)>Lo_partitionNum)= yes;
+                    Npmr_l_U_temp(l_b,c_b) = Npmr_l_U(l_b,c_b);
+                    uc_c_abt(uc_b,c_b)$(Npmr_uc_U(uc_b,c_b)>Lo_partitionNum) = yes;
+                    Npmr_uc_U_temp(uc_b,c_b) = Npmr_uc_U(uc_b,c_b);
+                    l_abt(l_b)$(Npwu_l_U(l_b)>Lo_partitionNum) = yes;
+                    Npwu_l_U_temp(l_b) = Npwu_l_U(l_b);
+                    display l_c_abt, uc_c_abt, l_abt;
+                    display Npmr_l_U, Npmr_uc_U, Npwu_l_U;
+                    display Npmr_l_USol, Npmr_l_LSol, Npmr_uc_USol, Npmr_uc_LSol, Npwu_l_USol, Npwu_l_LSol;
+                    #pcout部分的abt
+                    loop(iter_abt_pcout$(ord(iter_abt_pcout)<=NiterabtU and card(l_c_abt)+card(uc_c_abt)>0),
+                        #BL项和Fl_alpha项分开执行abt，BL项无法紧缩，继续紧缩Fl_alpha,并不跳出abt
+                        #执行紧缩的变量为候选变量中分割区间数最大的,并且是其中偏差值最大的
+                        #---先找到需要的参数，再loop找到符合条件的
+                        Npmax_abt  = max(smax(l_c_abt(l,c), Npmr_l_U(l,c)),smax(uc_c_abt(uc,c), Npmr_uc_U(uc,c)));
+                        Devimax_abt = max(smax(l_c_abt(l,c)$(Npmr_l_U(l,c) = Npmax_abt), Plcout_BLsum_devi(l,c)),
+                                          smax(uc_c_abt(uc,c)$(Npmr_uc_U(uc,c) = Npmax_abt), Puccout_BLsum_devi(uc,c)));
+                        display Npmax_abt,Devimax_abt;
+                        #--plcout部分紧缩
+                        loop((l_b,c_b)$(card(l_c_abt)<>0 and l_c_abt(l_b,c_b) and Npmr_l_U(l_b,c_b) = Npmax_abt
+                                        and Plcout_BLsum_devi(l_b,c_b) = Devimax_abt and Npmr_l_U(l_b,c_b)>Lo_partitionNum),#限制紧缩的变量为：分割区间数大于限制值 , 大于限制值没啥必要，2,3个区间的也可以紧缩   
+                            display "-abt plcout- --";;
+                            # Step 4.1 ------ bound contraction implementation !!!!!(基于保守策略的紧缩方法)
+                            Yplcout_pmr_Bt(l_b,c_b,np)$l_c_np(l_b,c_b,np)=1;#由于可能进行多轮紧缩，所以需要先重置为1
+                            #基于RP解和P解位置判断先紧缩下边界还是上边界（看参考区间两侧的剩余区间数多少）
+                            #display Plcout_LSol,plcout.Up,plcout.Lo;
+                            #1如果上下界解在整个紧缩区间两侧，则跳过该变量紧缩
+                            if(max(Npmr_l_USol(l_b,c_b),Npmr_l_LSol(l_b,c_b))-min(Npmr_l_USol(l_b,c_b),Npmr_l_LSol(l_b,c_b))+1 = Npmr_l_U(l_b,c_b),
+                                l_c_abt(l_b,c_b) = no;#此时的(l_b,c_b)是确定的
+                                #
+                                display "========================================";
+                                #
+                                display l_c_abt; 
+                                #
+                                display "skip(Cond 1)the abt for this plcout variable";
+                                break;
+                            );
+                            #2如果该浓度项对应的水流率为0，即使分割多个区间，同样无法紧缩，跳过紧缩的执行
+                            if(Fl_LSol(l_b) = 0,
+                                l_c_abt(l_b,c_b) = no;#此时的(l_b,c_b)是确定的
+                                #
+                                display "========================================";
+                                #
+                                display l_c_abt; 
+                                #
+                                display "skip(Cond 2)the abt for this plcout variable";
+                                break;
+                            );
+                            #3只紧缩偏离当前解所在区间的较远侧区间
+                            if((Npmr_l_U(l_b,c_b)-max(Npmr_l_USol(l_b,c_b),Npmr_l_LSol(l_b,c_b)))
+                               >=(min(Npmr_l_USol(l_b,c_b),Npmr_l_LSol(l_b,c_b))-1),
+                                display "========================================";
+                                display "Ub domain is tightened";                                   
+                                for(Interval = Npmr_l_U(l_b,c_b) downto (max(Npmr_l_USol(l_b,c_b),Npmr_l_LSol(l_b,c_b))+1) by 1,#是downto,不是to,先到二者较大的
+                                    yplcout_pmr.fx(l_b,c_b,np)$(ord(np)=Interval) = 1;#直接固定子区间为待消减的区间，不用更新边界
+                                    #暂存边界值
+                                    PlcoutUp_temp(l_b,c_b) = plcout.Up(l_b,c_b); 
+                                    PlcoutLo_temp(l_b,c_b) = plcout.Lo(l_b,c_b);
+                                    FsmUp_temp(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = fsm.Up(sl,mj); 
+                                    FsmUp_temp(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = fsm.Up(sl,ml);
+                                    FsmUp_temp(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = fsm.Up(sl,mc);
+                                    FsmUp_temp(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = fsm.Up(sl,mf);                                        
+                                    FsmUp_temp(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = fsm.Up(sl,ml);
+                                    FsmUp_temp(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = fsm.Up(sc,ml);
+                                    display "before update";  
+                                    display plcout.Up, plcout.Lo, fsm.Up;
+                                    #增加对变量域的更新和更新相关其他变量的边界更新
+                                    plcout.Up(l_b,c_b) = sum(np$(ord(np)=Interval), PlcoutnUp_pmr(l_b,c_b,np));
+                                    plcout.Lo(l_b,c_b) = sum(np$(ord(np)=Interval), PlcoutnLo_pmr(l_b,c_b,np));
+                                    #更新flj,fluc,fluf,fll-lout,fll-lin,fucl-lin边界
+                                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) =
+                                        min(fsm.Up(sl,mj),(sum(uf, Fufout(uf))+sum(uc, FucU(uc)))*sum(j$jin(mj,j),PjcU(j,c_b)/max(PjcU(j,c_b), plcout.Lo(l_b,c_b)))); #flj_UP 
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) =
+                                        min(fsm.Up(sl,ml), sum(la$lin(ml,la),fl.Up(la)*plcout.Up(la,c_b)/max(plcout.Up(la,c_b), plcout.Lo(l_b,c_b)*(1-Rlc(la,c_b))))); #fll_UP-lout                                         
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) =
+                                        min(fsm.Up(sl,mc), sum(uc$uin(mc,uc), FucU(uc)*( 1$(not max(PucinU(uc,c_b), plcout.Lo(l_b,c_b))) + (PucinU(uc,c_b)/max(PucinU(uc,c_b), plcout.Lo(l_b,c_b)))$(max(PucinU(uc,c_b), plcout.Lo(l_b,c_b))) ))); #fluc_UP   , PucinU(uc,c_b)也该跟puccout更新                                      
+                                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) =
+                                        min(fsm.Up(sl,mf),sum(uf$uin(mf,uf), Fufin(uf)*( 1$(not max(PucinU(uf,c_b), plcout.Lo(l_b,c_b))) + (PucinU(uf,c_b)/max(PucinU(uf,c_b), plcout.Lo(l_b,c_b)))$(max(PucinU(uf,c_b), plcout.Lo(l_b,c_b)))  )      )); #fluf_UP                                         
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) =
+                                        min(fsm.Up(sl,ml), fl.Up(l_b)*plcout.Up(l_b,c_b)/max(plcout.Up(l_b,c_b), sum(la$lout(la,sl), plcout.Lo(la,c_b))*(1-Rlc(l_b,c_b)))) ; #fll_UP-lin                                                                              
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) =
+                                        min(fsm.Up(sc,ml), fl.Up(l_b)*plcout.Up(l_b,c_b)/max(plcout.Up(l_b,c_b), sum(uc$uout(uc,sc), puccout.Lo(uc,c_b))*(1-Rlc(l_b,c_b)))) ; #fucl_UP-lin   
+                                    display "after update";  
+                                    display plcout.Up, plcout.Lo, fsm.Up;
+                                    #
+                                    #
+                                    Solve TWN_RP_PN_Abt using MIP minimizing objval;
+                                    Abt_Count = Abt_Count + 1;
+                                    #
+                                    # 
+                                    #还原变量边界避免影响其他问题(基于同样的变量)
+                                    plcout.Up(l_b,c_b) = PlcoutUp_temp(l_b,c_b); 
+                                    plcout.Lo(l_b,c_b) = PlcoutLo_temp(l_b,c_b); 
+                                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = FsmUp_temp(sl,mj); 
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = FsmUp_temp(sl,ml);
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = FsmUp_temp(sl,mc);
+                                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = FsmUp_temp(sl,mf);                                        
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = FsmUp_temp(sl,ml);
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = FsmUp_temp(sc,ml);
+                                    #display "after restore";  
+                                    #display plcout.Up, plcout.Lo, fsm.Up;
+                                    #display Interval;
+                                    #display objval.L,TWN_RP_PN_Abt.objest;
+                                    #不论是提前终止还是正常求解结束，判断可紧缩的方法一致,都可以基于当前objest
+                                    if(TWN_RP_PN_Abt.objest > UB, Yplcout_pmr_Bt(l_b,c_b,np)$(ord(np)=Interval)=0; );#如果可紧缩记录下对应的区间值,继续执行紧缩                                         
+                                    #display Yplcout_pmr_Bt;
+                                    yplcout_pmr.Up(l_b,c_b,np)$(ord(np)=Interval) = 1;#还原
+                                    yplcout_pmr.Lo(l_b,c_b,np)$(ord(np)=Interval) = 0;#还原
+                                    #提前终止Abt方法:如果待紧缩变量最远侧子区间无法消减(对于靠近下边界，最远侧是子区间Npmr_l_U)，则跳出pcout边界紧缩过程 break=3，优先判断,不需要再更新紧缩集合
+                                    break$sum(np$(ord(np)=Interval and l_c_np(l_b,c_b,np) and ord(np)=Npmr_l_U(l_b,c_b)), Yplcout_pmr_Bt(l_b,c_b,np)) 3;
+                                    #如果没实现子区间的紧缩,则跳出子区间紧缩
+                                    break$sum(np$(ord(np)=Interval and l_c_np(l_b,c_b,np)), Yplcout_pmr_Bt(l_b,c_b,np)); 
+                                );                                                                            
+                            else
+                                display "========================================";
+                                display "Lb domain is tightened";
+                                for(Interval = 1 to (min(Npmr_l_USol(l_b,c_b),Npmr_l_LSol(l_b,c_b))-1) by 1,                                   
+                                    yplcout_pmr.fx(l_b,c_b,np)$(ord(np)=Interval) = 1;
+                                    #暂存边界值
+                                    PlcoutUp_temp(l_b,c_b) = plcout.Up(l_b,c_b); 
+                                    PlcoutLo_temp(l_b,c_b) = plcout.Lo(l_b,c_b);
+                                    FsmUp_temp(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = fsm.Up(sl,mj); 
+                                    FsmUp_temp(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = fsm.Up(sl,ml);
+                                    FsmUp_temp(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = fsm.Up(sl,mc);
+                                    FsmUp_temp(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = fsm.Up(sl,mf);                                        
+                                    FsmUp_temp(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = fsm.Up(sl,ml);
+                                    FsmUp_temp(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = fsm.Up(sc,ml);
+                                    display "before update";                                          
+                                    display plcout.Up, plcout.Lo, fsm.Up;
+                                    #增加对变量域的更新和更新相关其他变量的边界更新
+                                    plcout.Up(l_b,c_b) = sum(np$(ord(np)=Interval), PlcoutnUp_pmr(l_b,c_b,np));
+                                    plcout.Lo(l_b,c_b) = sum(np$(ord(np)=Interval), PlcoutnLo_pmr(l_b,c_b,np));
+                                    #更新flj,fluc,fluf,fll-lout,fll-lin,fucl-lin边界
+                                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) =
+                                        min(fsm.Up(sl,mj),(sum(uf, Fufout(uf))+sum(uc, FucU(uc)))*sum(j$jin(mj,j),PjcU(j,c_b)/max(PjcU(j,c_b), plcout.Lo(l_b,c_b)))); #flj_UP 
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) =
+                                        min(fsm.Up(sl,ml), sum(la$lin(ml,la),fl.Up(la)*plcout.Up(la,c_b)/max(plcout.Up(la,c_b), plcout.Lo(l_b,c_b)*(1-Rlc(la,c_b))))); #fll_UP-lout                                         
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) =
+                                        min(fsm.Up(sl,mc), sum(uc$uin(mc,uc), FucU(uc)*( 1$(not max(PucinU(uc,c_b), plcout.Lo(l_b,c_b))) + (PucinU(uc,c_b)/max(PucinU(uc,c_b), plcout.Lo(l_b,c_b)))$(max(PucinU(uc,c_b), plcout.Lo(l_b,c_b))) ))); #fluc_UP   , PucinU(uc,c_b)也该跟puccout更新                                      
+                                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) =
+                                        min(fsm.Up(sl,mf),sum(uf$uin(mf,uf), Fufin(uf)*( 1$(not max(PucinU(uf,c_b), plcout.Lo(l_b,c_b))) + (PucinU(uf,c_b)/max(PucinU(uf,c_b), plcout.Lo(l_b,c_b)))$(max(PucinU(uf,c_b), plcout.Lo(l_b,c_b)))  )      )); #fluf_UP                                         
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) =
+                                        min(fsm.Up(sl,ml), fl.Up(l_b)*plcout.Up(l_b,c_b)/max(plcout.Up(l_b,c_b), sum(la$lout(la,sl), plcout.Lo(la,c_b))*(1-Rlc(l_b,c_b)))) ; #fll_UP-lin                                                                              
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) =
+                                        min(fsm.Up(sc,ml), fl.Up(l_b)*plcout.Up(l_b,c_b)/max(plcout.Up(l_b,c_b), sum(uc$uout(uc,sc), puccout.Lo(uc,c_b))*(1-Rlc(l_b,c_b)))) ; #fucl_UP-lin                                                                           
+                                    display "after update";                                       
+                                    display plcout.Up, plcout.Lo, fsm.Up;
+                                    #
+                                    #
+                                    Solve TWN_RP_PN_Abt using MIP minimizing objval;
+                                    Abt_Count = Abt_Count + 1;
+                                    #
+                                    #
+                                    #还原变量边界避免影响其他问题(基于同样的变量)
+                                    plcout.Up(l_b,c_b) = PlcoutUp_temp(l_b,c_b); 
+                                    plcout.Lo(l_b,c_b) = PlcoutLo_temp(l_b,c_b); 
+                                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = FsmUp_temp(sl,mj); 
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = FsmUp_temp(sl,ml);
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = FsmUp_temp(sl,mc);
+                                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = FsmUp_temp(sl,mf);                                        
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = FsmUp_temp(sl,ml);
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = FsmUp_temp(sc,ml);
+                                    #display "after restore";
+                                    #display plcout.Up, plcout.Lo, fsm.Up;
+                                    #display Interval;
+                                    #display objval.L,TWN_RP_PN_Abt.objest;
+                                    if(TWN_RP_PN_Abt.objest > UB, Yplcout_pmr_Bt(l_b,c_b,np)$(ord(np)=Interval)=0; );#如果可紧缩记录下对应的区间值,继续执行紧缩
+                                    #display Yplcout_pmr_Bt;
+                                    yplcout_pmr.Up(l_b,c_b,np)$(ord(np)=Interval) = 1;#还原
+                                    yplcout_pmr.Lo(l_b,c_b,np)$(ord(np)=Interval) = 0;#还原
+                                    #提前终止Abt方法:如果待紧缩变量最远侧子区间无法消减(对于靠近下边界，最远侧是子区间Npmr_l_U)，则跳出BL边界紧缩过程，优先判断，注意跳出前先更新下紧缩集合
+                                    break$sum(np$(ord(np)=Interval and l_c_np(l_b,c_b,np) and ord(np)=1), Yplcout_pmr_Bt(l_b,c_b,np)) 3;
+                                    #如果没实现子区间的紧缩,则跳出子区间紧缩
+                                    break$sum(np$(ord(np)=Interval and l_c_np(l_b,c_b,np)), Yplcout_pmr_Bt(l_b,c_b,np)); 
+                                );
+                            );
+                            # Step 4.2 ------ 如果实现了变量的边界紧缩（没有两次跳出发生）则更新分割方案和变量的边界以及辅助参数
+                            #display "--------------before contraction---------------"
+                            #display plcout.Up, plcout.Lo, fsm.Up;
+                            plcout.Up(l_b,c_b) = smax(np$Yplcout_pmr_Bt(l_b,c_b,np), PlcoutnUp_pmr(l_b,c_b,np));
+                            plcout.Lo(l_b,c_b) = smin(np$Yplcout_pmr_Bt(l_b,c_b,np), PlcoutnLo_pmr(l_b,c_b,np));
+                            #执行边界直接传播，增加对变量域(fsm)的更新和更新相关其他变量(yl)的边界更新
+                            #更新flj,fluc,fluf,fll-lout,fll-lin,fucl-lin边界
+                            fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) =
+                                min(fsm.Up(sl,mj),(sum(uf, Fufout(uf))+sum(uc, FucU(uc)))*sum(j$jin(mj,j),PjcU(j,c_b)/max(PjcU(j,c_b), plcout.Lo(l_b,c_b)))); #flj_UP 
+                            fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) =
+                                min(fsm.Up(sl,ml), sum(la$lin(ml,la),fl.Up(la)*plcout.Up(la,c_b)/max(plcout.Up(la,c_b), plcout.Lo(l_b,c_b)*(1-Rlc(la,c_b))))); #fll_UP-lout                                         
+                            fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) =
+                                min(fsm.Up(sl,mc), sum(uc$uin(mc,uc), FucU(uc)*( 1$(not max(PucinU(uc,c_b), plcout.Lo(l_b,c_b))) + (PucinU(uc,c_b)/max(PucinU(uc,c_b), plcout.Lo(l_b,c_b)))$(max(PucinU(uc,c_b), plcout.Lo(l_b,c_b))) ))); #fluc_UP   , PucinU(uc,c_b)也该跟puccout更新                                      
+                            fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) =
+                                min(fsm.Up(sl,mf),sum(uf$uin(mf,uf), Fufin(uf)*( 1$(not max(PucinU(uf,c_b), plcout.Lo(l_b,c_b))) + (PucinU(uf,c_b)/max(PucinU(uf,c_b), plcout.Lo(l_b,c_b)))$(max(PucinU(uf,c_b), plcout.Lo(l_b,c_b)))  )      )); #fluf_UP                                         
+                            fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) =
+                                min(fsm.Up(sl,ml), fl.Up(l_b)*plcout.Up(l_b,c_b)/max(plcout.Up(l_b,c_b), sum(la$lout(la,sl), plcout.Lo(la,c_b))*(1-Rlc(l_b,c_b)))) ; #fll_UP-lin                                                                              
+                            fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) =
+                                min(fsm.Up(sc,ml), fl.Up(l_b)*plcout.Up(l_b,c_b)/max(plcout.Up(l_b,c_b), sum(uc$uout(uc,sc), puccout.Lo(uc,c_b))*(1-Rlc(l_b,c_b)))) ; #fucl_UP-lin                                                                          
+                            #display "--------------after contraction---------------"
+                            #display plcout.Up, plcout.Lo, fsm.Up;
+                            #先更新子区间边界，再更新分割点比较好
+                            Count_bt = 0;
+                            loop(np$(l_c_np(l_b,c_b,np) and Yplcout_pmr_Bt(l_b,c_b,np)),
+                                Count_bt = Count_bt +1;
+                                PlcoutnUp_pmr(l_b,c_b,np_a)$(ord(np_a)=Count_bt) = PlcoutnUp_pmr(l_b,c_b,np);
+                                PlcoutnLo_pmr(l_b,c_b,np_a)$(ord(np_a)=Count_bt) = PlcoutnLo_pmr(l_b,c_b,np);   
+                            );                                    
+                            #清零原来的子区间多余边界值#,原来的多余分割点值
+                            PlcoutnUp_pmr(l_b,c_b,np)$(ord(np)>Count_bt and ord(np)<=Npmr_l_U(l_b,c_b)) = 0;
+                            PlcoutnLo_pmr(l_b,c_b,np)$(ord(np)>Count_bt and ord(np)<=Npmr_l_U(l_b,c_b)) = 0;
+                            Plcoutq_pmr(l_b,c_b,qp)$(ord(qp)>(Count_bt+1) and ord(qp)<=(Npmr_l_U(l_b,c_b)+1)) = 0;
+                            #更新Npmr_l_U,l_c_np,l_c_qp,Plcoutq_pmr,Npmr_l_LSol,Npmr_l_USol
+                            Npmr_l_U(l_b,c_b) = sum(np$l_c_np(l_b,c_b,np), Yplcout_pmr_Bt(l_b,c_b,np));
+                            l_c_np(l_b,c_b,np) = yes$(ord(np) <= Npmr_l_U(l_b,c_b));
+                            l_c_qp(l_b,c_b,qp) = yes$(ord(qp) <= (Npmr_l_U(l_b,c_b) + 1));
+                            Plcoutq_pmr(l_b,c_b,qp)$(l_c_qp(l_b,c_b,qp) and ord(qp)<=Npmr_l_U(l_b,c_b)) =
+                                sum(np$(l_c_np(l_b,c_b,np) and ord(np)=ord(qp)),PlcoutnLo_pmr(l_b,c_b,np));
+                            Plcoutq_pmr(l_b,c_b,qp)$(l_c_qp(l_b,c_b,qp) and ord(qp)=(Npmr_l_U(l_b,c_b)+1)) =
+                                sum(np$(l_c_np(l_b,c_b,np) and ord(np)=(ord(qp)-1)),PlcoutnUp_pmr(l_b,c_b,np));
+                            Npmr_l_LSol(l_b,c_b) = sum(np$(PlcoutnUp_pmr(l_b,c_b,np) >= Plcout_LSol(l_b,c_b)
+                                                           and PlcoutnLo_pmr(l_b,c_b,np) <= Plcout_LSol(l_b,c_b)
+                                                           and l_c_np(l_b,c_b,np)), ord(np));
+                            Npmr_l_USol(l_b,c_b) = sum(np$(PlcoutnUp_pmr(l_b,c_b,np) >= Plcout_USol(l_b,c_b)*1E-3
+                                                           and PlcoutnLo_pmr(l_b,c_b,np) <= Plcout_USol(l_b,c_b)*1E-3
+                                                           and l_c_np(l_b,c_b,np)), ord(np));
+                            #
+                            display "-after bt for the current plcout variable---", Npmr_l_U, PlcoutnUp_pmr, PlcoutnLo_pmr, Plcoutq_pmr, Npmr_l_USol, Npmr_l_LSol, l_c_np, plcout.Up, plcout.Lo;
+                            #-------------------------------
+                            l_c_abt(l_b,c_b) = no;#此时的(l_b,c_b)是确定的
+                            display "-remaining plcout variables to implement abt  ---",l_c_abt;
+                        ); #一次loop只能执行一轮分割区间数最大的，需要多次执行，直到满足跳出条件
+                        #--puccout部分紧缩
+                        loop((uc_b,c_b)$(card(uc_c_abt)<>0 and uc_c_abt(uc_b,c_b)  and Npmr_uc_U(uc_b,c_b) = Npmax_abt
+                                         and Puccout_BLsum_devi(uc_b,c_b) = Devimax_abt and Npmr_uc_U(uc_b,c_b)>Lo_partitionNum),#限制紧缩的变量为：分割区间数大于限制值, 大于限制值没啥必要，2,3个区间的也可以紧缩      
+                            display "-abt puccout-";
+                            # Step 4.1 ------ bound contraction implementation !!!!!(基于保守策略的紧缩方法)
+                            Ypuccout_pmr_Bt(uc_b,c_b,np)$uc_c_np(uc_b,c_b,np)=1;#由于可能进行多轮紧缩，所以需要先重置为1
+                            #基于RP解和P解位置判断先紧缩下边界还是上边界（看参考区间两侧的剩余区间数多少）
+                            #display Puccout_LSol,puccout.Up,puccout.Lo;
+                            #1如果上下界解在整个紧缩区间两侧，则跳过该变量紧缩
+                            if(max(Npmr_uc_USol(uc_b,c_b),Npmr_uc_LSol(uc_b,c_b))-min(Npmr_uc_USol(uc_b,c_b),Npmr_uc_LSol(uc_b,c_b))+1 = Npmr_uc_U(uc_b,c_b),
+                                uc_c_abt(uc_b,c_b) = no;#此时的(uc_b,c_b)是确定的
+                                #
+                                display "========================================";
+                                #
+                                display uc_c_abt; 
+                                #
+                                display "skip(Cond 1)the abt for this puccout variable";
+                                break;
+                            );
+                            #2只紧缩偏离当前解所在区间的较远侧区间
+                            if((Npmr_uc_U(uc_b,c_b)-max(Npmr_uc_USol(uc_b,c_b),Npmr_uc_LSol(uc_b,c_b)))
+                               >=(min(Npmr_uc_USol(uc_b,c_b),Npmr_uc_LSol(uc_b,c_b))-1),
+                                display "========================================";
+                                display "Ub domain is tightened";                                   
+                                for(Interval = Npmr_uc_U(uc_b,c_b) downto (max(Npmr_uc_USol(uc_b,c_b),Npmr_uc_LSol(uc_b,c_b))+1) by 1,#是downto,不是to,先到二者较大的
+                                    ypuccout_pmr.fx(uc_b,c_b,np)$(ord(np)=Interval) = 1;#直接固定子区间为待消减的区间，不用更新边界
+                                    #暂存边界值
+                                    PuccoutUp_temp(uc_b,c_b) = puccout.Up(uc_b,c_b); 
+                                    PuccoutLo_temp(uc_b,c_b) = puccout.Lo(uc_b,c_b);
+                                    FsmUp_temp(sc,mj)$(asm(sc,mj) and not ssm(sc,mj) and uout(uc_b,sc)) = fsm.Up(sc,mj); 
+                                    FsmUp_temp(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and uout(uc_b,sc)) = fsm.Up(sc,ml);
+                                    FsmUp_temp(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uout(uc_b,sc)) = fsm.Up(sc,mc);
+                                    FsmUp_temp(sc,mf)$(asm(sc,mf) and not ssm(sc,mf) and uout(uc_b,sc)) = fsm.Up(sc,mf);                                        
+                                    FsmUp_temp(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uin(mc,uc_b)) = fsm.Up(sc,mc);
+                                    FsmUp_temp(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and uin(mc,uc_b)) = fsm.Up(sl,mc);
+                                    display "before update";  
+                                    display PucinU, puccout.Up, puccout.Lo, fsm.Up;
+                                    #增加对变量域的更新和更新相关其他变量的边界更新
+                                    puccout.Up(uc_b,c_b) = sum(np$(ord(np)=Interval), PuccoutnUp_pmr(uc_b,c_b,np));
+                                    puccout.Lo(uc_b,c_b) = sum(np$(ord(np)=Interval), PuccoutnLo_pmr(uc_b,c_b,np));
+                                    #基于puccout.Up更新PucinU（基于单调性和守恒）
+                                    PucinU(uc_b,c_b) = puccout.Up(uc_b,c_b)-Fucc_delta(uc_b,c_b)/FucU(uc_b);
+                                    #更新fucj,fucl,flucuf,fucuc-uout,fucuc-uin,fluc-uin边界
+                                    fsm.Up(sc,mj)$(asm(sc,mj) and not ssm(sc,mj) and uout(uc_b,sc)) =
+                                        min(fsm.Up(sc,mj), (sum(uf, Fufout(uf))+sum(uc, FucU(uc)))*sum(j$jin(mj,j),PjcU(j,c_b)/max(PjcU(j,c_b), puccout.Lo(uc_b,c_b)))); #fucj_UP 
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and uout(uc_b,sc)) =
+                                        min(fsm.Up(sc,ml), sum(la$lin(ml,la),fl.Up(la)*plcout.Up(la,c_b)/max(plcout.Up(la,c_b), puccout.Lo(uc_b,c_b)*(1-Rlc(la,c_b))))); #fucl_UP-uout                                         
+                                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uout(uc_b,sc)) =
+                                        min(fsm.Up(sc,mc), sum(uc$uin(mc,uc), FucU(uc)*( 1$(not max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b))) + (PucinU(uc,c_b)/max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b)))$(max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b))) ))); #fluc_UP   , PucinU(uc,c_b)也该跟puccout更新                                      
+                                    fsm.Up(sc,mf)$(asm(sc,mf) and not ssm(sc,mf) and uout(uc_b,sc)) =
+                                        min(fsm.Up(sc,mf), sum(uf$uin(mf,uf), Fufin(uf)*( 1$(not max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b))) + (PucinU(uf,c_b)/max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)))$(max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)))  )      )); #fluf_UP                                         
+                                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uin(mc,uc_b)) =
+                                        min(fsm.Up(sc,mc), FucU(uc_b)* (1$(not max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b)))) + (PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b))))$max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b)))   )); #fucuc_UP-uin                                                                              
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and uin(mc,uc_b)) =
+                                        min(fsm.Up(sl,mc), FucU(uc_b)* (1$(not max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b)))) + (PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b))))$max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b)))   )); #fluc_UP-uin 
+                                    display "after update";  
+                                    display PucinU, puccout.Up, puccout.Lo, fsm.Up;
+                                    #
+                                    #
+                                    Solve TWN_RP_PN_Abt using MIP minimizing objval;
+                                    Abt_Count = Abt_Count + 1;
+                                    #
+                                    # 
+                                    #还原变量边界避免影响其他问题(基于同样的变量)
+                                    puccout.Up(uc_b,c_b) = PuccoutUp_temp(uc_b,c_b); 
+                                    puccout.Lo(uc_b,c_b) = PuccoutLo_temp(uc_b,c_b);
+                                    PucinU(uc_b,c_b) = puccout.Up(uc_b,c_b)-Fucc_delta(uc_b,c_b)/FucU(uc_b);
+                                    fsm.Up(sc,mj)$(asm(sc,mj) and not ssm(sc,mj) and uout(uc_b,sc)) = FsmUp_temp(sc,mj); 
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and uout(uc_b,sc)) = FsmUp_temp(sc,ml);
+                                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uout(uc_b,sc)) = FsmUp_temp(sc,mc);
+                                    fsm.Up(sc,mf)$(asm(sc,mf) and not ssm(sc,mf) and uout(uc_b,sc)) = FsmUp_temp(sc,mf);                                        
+                                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uin(mc,uc_b)) = FsmUp_temp(sc,mc);
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and uin(mc,uc_b)) = FsmUp_temp(sl,mc);
+                                    #display "after restore";  
+                                    #display puccout.Up, puccout.Lo, fsm.Up;
+                                    #display Interval;
+                                    #display objval.L,TWN_RP_PN_Abt.objest;
+                                    #不论是提前终止还是正常求解结束，判断可紧缩的方法一致,都可以基于当前objest
+                                    if(TWN_RP_PN_Abt.objest > UB, Ypuccout_pmr_Bt(uc_b,c_b,np)$(ord(np)=Interval)=0; );#如果可紧缩记录下对应的区间值,继续执行紧缩                                         
+                                    #display Ypuccout_pmr_Bt;
+                                    ypuccout_pmr.Up(uc_b,c_b,np)$(ord(np)=Interval) = 1;#还原
+                                    ypuccout_pmr.Lo(uc_b,c_b,np)$(ord(np)=Interval) = 0;#还原
+                                    #提前终止Abt方法:如果待紧缩变量最远侧子区间无法消减(对于靠近下边界，最远侧是子区间Npmr_uc_U)，则跳出pcout边界紧缩过程 break=3，优先判断,不需要再更新紧缩集合
+                                    break$sum(np$(ord(np)=Interval and uc_c_np(uc_b,c_b,np) and ord(np)=Npmr_uc_U(uc_b,c_b)), Ypuccout_pmr_Bt(uc_b,c_b,np)) 3;
+                                    #如果没实现子区间的紧缩,则跳出子区间紧缩
+                                    break$sum(np$(ord(np)=Interval and uc_c_np(uc_b,c_b,np)), Ypuccout_pmr_Bt(uc_b,c_b,np)); 
+                                );                                                                            
+                            else
+                                display "========================================";
+                                display "Lb domain is tightened";
+                                for(Interval = 1 to (min(Npmr_uc_USol(uc_b,c_b),Npmr_uc_LSol(uc_b,c_b))-1) by 1,                                   
+                                    ypuccout_pmr.fx(uc_b,c_b,np)$(ord(np)=Interval) = 1;
+                                    #暂存边界值
+                                    PuccoutUp_temp(uc_b,c_b) = puccout.Up(uc_b,c_b); 
+                                    PuccoutLo_temp(uc_b,c_b) = puccout.Lo(uc_b,c_b);
+                                    FsmUp_temp(sc,mj)$(asm(sc,mj) and not ssm(sc,mj) and uout(uc_b,sc)) = fsm.Up(sc,mj); 
+                                    FsmUp_temp(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and uout(uc_b,sc)) = fsm.Up(sc,ml);
+                                    FsmUp_temp(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uout(uc_b,sc)) = fsm.Up(sc,mc);
+                                    FsmUp_temp(sc,mf)$(asm(sc,mf) and not ssm(sc,mf) and uout(uc_b,sc)) = fsm.Up(sc,mf);                                        
+                                    FsmUp_temp(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uin(mc,uc_b)) = fsm.Up(sc,mc);
+                                    FsmUp_temp(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and uin(mc,uc_b)) = fsm.Up(sl,mc);
+                                    display "before update";  
+                                    display PucinU, puccout.Up, puccout.Lo, fsm.Up;
+                                    #增加对变量域的更新和更新相关其他变量的边界更新
+                                    puccout.Up(uc_b,c_b) = sum(np$(ord(np)=Interval), PuccoutnUp_pmr(uc_b,c_b,np));
+                                    puccout.Lo(uc_b,c_b) = sum(np$(ord(np)=Interval), PuccoutnLo_pmr(uc_b,c_b,np));
+                                    #基于puccout.Up更新PucinU（基于单调性和守恒）
+                                    PucinU(uc_b,c_b) = puccout.Up(uc_b,c_b)-Fucc_delta(uc_b,c_b)/FucU(uc_b);
+                                    #更新fucj,fucl,flucuf,fucuc-uout,fucuc-uin,fluc-uin边界
+                                    fsm.Up(sc,mj)$(asm(sc,mj) and not ssm(sc,mj) and uout(uc_b,sc)) =
+                                        min(fsm.Up(sc,mj), (sum(uf, Fufout(uf))+sum(uc, FucU(uc)))*sum(j$jin(mj,j),PjcU(j,c_b)/max(PjcU(j,c_b), puccout.Lo(uc_b,c_b)))); #fucj_UP 
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and uout(uc_b,sc)) =
+                                        min(fsm.Up(sc,ml), sum(la$lin(ml,la),fl.Up(la)*plcout.Up(la,c_b)/max(plcout.Up(la,c_b), puccout.Lo(uc_b,c_b)*(1-Rlc(la,c_b))))); #fucl_UP-uout                                         
+                                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uout(uc_b,sc)) =
+                                        min(fsm.Up(sc,mc), sum(uc$uin(mc,uc), FucU(uc)*( 1$(not max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b))) + (PucinU(uc,c_b)/max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b)))$(max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b))) ))); #fluc_UP   , PucinU(uc,c_b)也该跟puccout更新                                      
+                                    fsm.Up(sc,mf)$(asm(sc,mf) and not ssm(sc,mf) and uout(uc_b,sc)) =
+                                        min(fsm.Up(sc,mf), sum(uf$uin(mf,uf), Fufin(uf)*( 1$(not max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b))) + (PucinU(uf,c_b)/max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)))$(max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)))  )      )); #fluf_UP                                         
+                                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uin(mc,uc_b)) =
+                                        min(fsm.Up(sc,mc), FucU(uc_b)* (1$(not max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b)))) + (PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b))))$max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b)))   )); #fucuc_UP-uin                                                                              
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and uin(mc,uc_b)) =
+                                        min(fsm.Up(sl,mc), FucU(uc_b)* (1$(not max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b)))) + (PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b))))$max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b)))   )); #fluc_UP-uin 
+                                    display "after update";  
+                                    display PucinU, puccout.Up, puccout.Lo, fsm.Up;
+                                    #
+                                    #
+                                    Solve TWN_RP_PN_Abt using MIP minimizing objval;
+                                    Abt_Count = Abt_Count + 1;
+                                    #
+                                    # 
+                                    #还原变量边界避免影响其他问题(基于同样的变量)
+                                    puccout.Up(uc_b,c_b) = PuccoutUp_temp(uc_b,c_b); 
+                                    puccout.Lo(uc_b,c_b) = PuccoutLo_temp(uc_b,c_b);
+                                    PucinU(uc_b,c_b) = puccout.Up(uc_b,c_b)-Fucc_delta(uc_b,c_b)/FucU(uc_b);
+                                    fsm.Up(sc,mj)$(asm(sc,mj) and not ssm(sc,mj) and uout(uc_b,sc)) = FsmUp_temp(sc,mj); 
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and uout(uc_b,sc)) = FsmUp_temp(sc,ml);
+                                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uout(uc_b,sc)) = FsmUp_temp(sc,mc);
+                                    fsm.Up(sc,mf)$(asm(sc,mf) and not ssm(sc,mf) and uout(uc_b,sc)) = FsmUp_temp(sc,mf);                                        
+                                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uin(mc,uc_b)) = FsmUp_temp(sc,mc);
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and uin(mc,uc_b)) = FsmUp_temp(sl,mc);
+                                    #display "after restore";
+                                    #display puccout.Up, puccout.Lo, fsm.Up;
+                                    #display Interval;
+                                    #display objval.L,TWN_RP_PN_Abt.objest;
+                                    if(TWN_RP_PN_Abt.objest > UB, Ypuccout_pmr_Bt(uc_b,c_b,np)$(ord(np)=Interval)=0; );#如果可紧缩记录下对应的区间值,继续执行紧缩
+                                    #display Ypuccout_pmr_Bt;
+                                    ypuccout_pmr.Up(uc_b,c_b,np)$(ord(np)=Interval) = 1;#还原
+                                    ypuccout_pmr.Lo(uc_b,c_b,np)$(ord(np)=Interval) = 0;#还原
+                                    #提前终止Abt方法:如果待紧缩变量最远侧子区间无法消减(对于靠近下边界，最远侧是子区间Npmr_uc_U)，则跳出BL边界紧缩过程，优先判断，注意跳出前先更新下紧缩集合
+                                    break$sum(np$(ord(np)=Interval and uc_c_np(uc_b,c_b,np) and ord(np)=1), Ypuccout_pmr_Bt(uc_b,c_b,np)) 3;
+                                    #如果没实现子区间的紧缩,则跳出子区间紧缩
+                                    break$sum(np$(ord(np)=Interval and uc_c_np(uc_b,c_b,np)), Ypuccout_pmr_Bt(uc_b,c_b,np)); 
+                                );
+                            );
+                            # Step 4.2 ------ 如果实现了变量的边界紧缩（没有两次跳出发生）则更新分割方案和变量的边界以及辅助参数
+                            #display "--------------before contraction---------------"
+                            #display puccout.Up, puccout.Lo, fsm.Up;
+                            puccout.Up(uc_b,c_b) = smax(np$Ypuccout_pmr_Bt(uc_b,c_b,np), PuccoutnUp_pmr(uc_b,c_b,np));
+                            puccout.Lo(uc_b,c_b) = smin(np$Ypuccout_pmr_Bt(uc_b,c_b,np), PuccoutnLo_pmr(uc_b,c_b,np));
+                            #基于puccout.Up更新PucinU（基于单调性和守恒）
+                            PucinU(uc_b,c_b) = puccout.Up(uc_b,c_b)-Fucc_delta(uc_b,c_b)/FucU(uc_b);
+                            
+                            #执行边界直接传播，增加对变量域(fsm)的更新和更新相关其他变量(yl)的边界更新
+                            #更新fucj,fucl,flucuf,fucuc-uout,fucuc-uin,fluc-uin边界
+                            fsm.Up(sc,mj)$(asm(sc,mj) and not ssm(sc,mj) and uout(uc_b,sc)) =
+                                min(fsm.Up(sc,mj), (sum(uf, Fufout(uf))+sum(uc, FucU(uc)))*sum(j$jin(mj,j),PjcU(j,c_b)/max(PjcU(j,c_b), puccout.Lo(uc_b,c_b)))); #fucj_UP 
+                            fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and uout(uc_b,sc)) =
+                                min(fsm.Up(sc,ml), sum(la$lin(ml,la),fl.Up(la)*plcout.Up(la,c_b)/max(plcout.Up(la,c_b), puccout.Lo(uc_b,c_b)*(1-Rlc(la,c_b))))); #fucl_UP-uout                                         
+                            fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uout(uc_b,sc)) =
+                                min(fsm.Up(sc,mc), sum(uc$uin(mc,uc), FucU(uc)*( 1$(not max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b))) + (PucinU(uc,c_b)/max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b)))$(max(PucinU(uc,c_b), puccout.Lo(uc_b,c_b))) ))); #fluc_UP   , PucinU(uc,c_b)也该跟puccout更新                                      
+                            fsm.Up(sc,mf)$(asm(sc,mf) and not ssm(sc,mf) and uout(uc_b,sc)) =
+                                min(fsm.Up(sc,mf), sum(uf$uin(mf,uf), Fufin(uf)*( 1$(not max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b))) + (PucinU(uf,c_b)/max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)))$(max(PucinU(uf,c_b), puccout.Lo(uc_b,c_b)))  )      )); #fluf_UP                                         
+                            fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc) and uin(mc,uc_b)) =
+                                min(fsm.Up(sc,mc), FucU(uc_b)* (1$(not max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b)))) + (PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b))))$max(PucinU(uc_b,c_b), sum(uca$uout(uca,sc), puccout.Lo(uca,c_b)))   )); #fucuc_UP-uin                                                                              
+                            fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and uin(mc,uc_b)) =
+                                min(fsm.Up(sl,mc), FucU(uc_b)* (1$(not max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b)))) + (PucinU(uc_b,c_b)/max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b))))$max(PucinU(uc_b,c_b), sum(l$lout(l,sl), plcout.Lo(l,c_b)))   )); #fluc_UP-uin                                                                        
+                            #display "--------------after contraction---------------"
+                            #display puccout.Up, puccout.Lo, fsm.Up;
+                            #先更新子区间边界，再更新分割点比较好
+                            Count_bt = 0;
+                            loop(np$(uc_c_np(uc_b,c_b,np) and Ypuccout_pmr_Bt(uc_b,c_b,np)),
+                                Count_bt = Count_bt +1;
+                                PuccoutnUp_pmr(uc_b,c_b,np_a)$(ord(np_a)=Count_bt) = PuccoutnUp_pmr(uc_b,c_b,np);
+                                PuccoutnLo_pmr(uc_b,c_b,np_a)$(ord(np_a)=Count_bt) = PuccoutnLo_pmr(uc_b,c_b,np);   
+                            );                                    
+                            #清零原来的子区间多余边界值#,原来的多余分割点值
+                            PuccoutnUp_pmr(uc_b,c_b,np)$(ord(np)>Count_bt and ord(np)<=Npmr_uc_U(uc_b,c_b)) = 0;
+                            PuccoutnLo_pmr(uc_b,c_b,np)$(ord(np)>Count_bt and ord(np)<=Npmr_uc_U(uc_b,c_b)) = 0;
+                            Puccoutq_pmr(uc_b,c_b,qp)$(ord(qp)>(Count_bt+1) and ord(qp)<=(Npmr_uc_U(uc_b,c_b)+1)) = 0;
+                            #更新Npmr_uc_U,uc_c_np,uc_c_qp,Puccoutq_pmr,Npmr_uc_LSol,Npmr_uc_USol
+                            Npmr_uc_U(uc_b,c_b) = sum(np$uc_c_np(uc_b,c_b,np), Ypuccout_pmr_Bt(uc_b,c_b,np));
+                            uc_c_np(uc_b,c_b,np) = yes$(ord(np) <= Npmr_uc_U(uc_b,c_b));
+                            uc_c_qp(uc_b,c_b,qp) = yes$(ord(qp) <= (Npmr_uc_U(uc_b,c_b) + 1));
+                            Puccoutq_pmr(uc_b,c_b,qp)$(uc_c_qp(uc_b,c_b,qp) and ord(qp)<=Npmr_uc_U(uc_b,c_b)) =
+                                sum(np$(uc_c_np(uc_b,c_b,np) and ord(np)=ord(qp)),PuccoutnLo_pmr(uc_b,c_b,np));
+                            Puccoutq_pmr(uc_b,c_b,qp)$(uc_c_qp(uc_b,c_b,qp) and ord(qp)=(Npmr_uc_U(uc_b,c_b)+1)) =
+                                sum(np$(uc_c_np(uc_b,c_b,np) and ord(np)=(ord(qp)-1)),PuccoutnUp_pmr(uc_b,c_b,np));
+                            Npmr_uc_LSol(uc_b,c_b) = sum(np$(PuccoutnUp_pmr(uc_b,c_b,np) >= Puccout_LSol(uc_b,c_b)
+                                                           and PuccoutnLo_pmr(uc_b,c_b,np) <= Puccout_LSol(uc_b,c_b)
+                                                           and uc_c_np(uc_b,c_b,np)), ord(np));
+                            Npmr_uc_USol(uc_b,c_b) = sum(np$(PuccoutnUp_pmr(uc_b,c_b,np) >= Puccout_USol(uc_b,c_b)*1E-3
+                                                           and PuccoutnLo_pmr(uc_b,c_b,np) <= Puccout_USol(uc_b,c_b)*1E-3
+                                                           and uc_c_np(uc_b,c_b,np)), ord(np));
+                            #
+                            display "-after bt for the current puccout variable---", Npmr_uc_U, PuccoutnUp_pmr, PuccoutnLo_pmr, Puccoutq_pmr, Npmr_uc_USol, Npmr_uc_LSol, uc_c_np, puccout.Up, puccout.Lo;
+                            #-------------------------------
+                            uc_c_abt(uc_b,c_b) = no;
+                            display "-remaining puccout variables to implement abt---",uc_c_abt;
+                        );
+                        #如果l_c_abt和uc_c_abt都是空集，则跳出iter_abt_pcout
+                        break$(card(l_c_abt)+card(uc_c_abt)=0);
+                    );
+                    
+
+                    #---Fl_alpha部分abt
+                    loop(iter_abt_fl$(ord(iter_abt_fl)<=NiterabtU and card(l_abt)>0),
+                        #---先找到需要的参数，再loop找到符合条件的,执行紧缩的变量为候选变量中分割区间数最大的,并且是其中偏差值最大的
+                        Npmax_abt  = smax(l_abt(l), Npwu_l_U(l));
+                        Devimax_abt = smax(l_abt(l)$(Npwu_l_U(l) = Npmax_abt), Fl_alpha_devi(l));
+                        display Npmax_abt, Devimax_abt;
+                        loop(l_b$(card(l_abt)<>0 and l_abt(l_b) and Npwu_l_U(l_b) = Npmax_abt
+                                  and Fl_alpha_devi(l_b) = Devimax_abt and Npwu_l_U(l_b)>Lo_partitionNum),#限制紧缩的变量为：分割区间数大于限制值      
+                            display "-abt flalpha ----t";
+                            # Step 4.1 ------ bound contraction implementation !!!!!(基于保守策略的紧缩方法)
+                            Yfl_pwu_Bt(l_b,np)$l_np(l_b,np)=1;#由于可能进行多轮紧缩，所以需要先重置为1
+                            #基于RP解和P解位置判断先紧缩下边界还是上边界（看参考区间两侧的剩余区间数多少）
+                            #1如果上下界解在整个紧缩区间两侧，则跳过该变量紧缩
+                            if(max(Npwu_l_USol(l_b),Npwu_l_LSol(l_b))-min(Npwu_l_USol(l_b),Npwu_l_LSol(l_b))+1 = Npwu_l_U(l_b),
+                                l_abt(l_b) = no;#此时的(l_b)是确定的
+                                #
+                                display "========================================";
+                                #
+                                display l_abt; 
+                                #
+                                display "skip the abt for this variable";
+                                break;
+                            );
+                            #2只紧缩偏离当前解所在区间的较远侧区间
+                            if((Npwu_l_U(l_b)-max(Npwu_l_USol(l_b),Npwu_l_LSol(l_b)))
+                               >=(min(Npwu_l_USol(l_b),Npwu_l_LSol(l_b))-1),
+                                display "========================================";
+                                display "Ub domain is tightened";                                   
+                                for(Interval = Npwu_l_U(l_b) downto (max(Npwu_l_USol(l_b),Npwu_l_LSol(l_b))+1) by 1,#是downto,不是to,先到二者较大的
+                                    yfl_pwu.fx(l_b,np)$(ord(np)=Interval) = 1;#直接固定子区间为待消减的区间，不用更新边界
+                                    #暂存边界值
+                                    FlUp_temp(l_b) = fl.Up(l_b); 
+                                    FlLo_temp(l_b) = fl.Lo(l_b);
+                                    FsmUp_temp(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = fsm.Up(sl,mj); 
+                                    FsmUp_temp(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = fsm.Up(sl,ml);
+                                    FsmUp_temp(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = fsm.Up(sl,mc);
+                                    FsmUp_temp(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = fsm.Up(sl,mf);                                        
+                                    FsmUp_temp(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = fsm.Up(sl,ml);
+                                    FsmUp_temp(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = fsm.Up(sc,ml);
+                                    display "before update";  
+                                    display fl.Up, fl.Lo, fsm.Up;
+                                    #增加对变量域的更新和更新相关其他变量的边界更新
+                                    fl.Up(l_b) = sum(np$(ord(np)=Interval), FlnUp_pwu(l_b,np));
+                                    fl.Lo(l_b) = sum(np$(ord(np)=Interval), FlnLo_pwu(l_b,np));
+                                    #更新flj,fluc,fluf,fll-lout,fll-lin,fucl-lin边界
+                                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mj)); #flj_UP 
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,ml)); #fll_UP-lout                                         
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mc)); #fluc_UP                                     
+                                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mf)); #fluf_UP                                         
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = min(fl.Up(l_b), fsm.Up(sl,ml)); #fll_UP-lin                                                                              
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = min(fl.Up(l_b), fsm.Up(sc,ml)); #fucl_UP-lin                                                                          
+                                    display "after update";  
+                                    display fl.Up, fl.Lo, fsm.Up;
+                                    #
+                                    #
+                                    Solve TWN_RP_PN_Abt using MIP minimizing objval;
+                                    Abt_Count = Abt_Count + 1;
+                                    #
+                                    # 
+                                    #还原变量边界避免影响其他问题(基于同样的变量)
+                                    fl.Up(l_b) = FlUp_temp(l_b); 
+                                    fl.Lo(l_b) = FlLo_temp(l_b); 
+                                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = FsmUp_temp(sl,mj); 
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = FsmUp_temp(sl,ml);
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = FsmUp_temp(sl,mc);
+                                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = FsmUp_temp(sl,mf);                                        
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = FsmUp_temp(sl,ml);
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = FsmUp_temp(sc,ml);
+                                    #display "after restore";  
+                                    #display fl.Up, fl.Lo, fsm.Up;
+                                    #display Interval;
+                                    #display objval.L,TWN_RP_PN_Abt.objest;
+                                    #不论是提前终止还是正常求解结束，判断可紧缩的方法一致,都可以基于当前objest
+                                    if(TWN_RP_PN_Abt.objest > UB, Yfl_pwu_Bt(l_b,np)$(ord(np)=Interval)=0; );#如果可紧缩记录下对应的区间值,继续执行紧缩                                         
+                                    #display Yfl_pwu_Bt;
+                                    yfl_pwu.Up(l_b,np)$(ord(np)=Interval) = 1;#还原
+                                    yfl_pwu.Lo(l_b,np)$(ord(np)=Interval) = 0;#还原
+                                    #提前终止Abt方法:如果待紧缩变量最远侧子区间无法消减(对于靠近下边界，最远侧是子区间Npwu_l_U)，则跳出所有的边界紧缩过程，优先判断
+                                    break$sum(np$(ord(np)=Interval and l_np(l_b,np) and ord(np)=Npwu_l_U(l_b)), Yfl_pwu_Bt(l_b,np)) 3;
+                                    #如果没实现子区间的紧缩,则跳出子区间紧缩
+                                    break$sum(np$(ord(np)=Interval and l_np(l_b,np)), Yfl_pwu_Bt(l_b,np)); 
+                                );                                                                            
+                            else
+                                display "========================================";
+                                display "Lb domain is tightened";
+                                for(Interval = 1 to (min(Npwu_l_USol(l_b),Npwu_l_LSol(l_b))-1) by 1,                                   
+                                    yfl_pwu.fx(l_b,np)$(ord(np)=Interval) = 1;
+                                    #暂存边界值
+                                    FlUp_temp(l_b) = fl.Up(l_b); 
+                                    FlLo_temp(l_b) = fl.Lo(l_b);
+                                    FsmUp_temp(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = fsm.Up(sl,mj); 
+                                    FsmUp_temp(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = fsm.Up(sl,ml);
+                                    FsmUp_temp(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = fsm.Up(sl,mc);
+                                    FsmUp_temp(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = fsm.Up(sl,mf);                                        
+                                    FsmUp_temp(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = fsm.Up(sl,ml);
+                                    FsmUp_temp(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = fsm.Up(sc,ml);
+                                    display "before update";                                          
+                                    display fl.Up, fl.Lo, fsm.Up;
+                                    #增加对变量域的更新和更新相关其他变量的边界更新
+                                    fl.Up(l_b) = sum(np$(ord(np)=Interval), FlnUp_pwu(l_b,np));
+                                    fl.Lo(l_b) = sum(np$(ord(np)=Interval), FlnLo_pwu(l_b,np));
+                                    #更新flj,fluc,fluf,fll-lout,fll-lin,fucl-lin边界
+                                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mj)); #flj_UP 
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,ml)); #fll_UP-lout                                         
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mc)); #fluc_UP                                     
+                                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mf)); #fluf_UP                                         
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = min(fl.Up(l_b), fsm.Up(sl,ml)); #fll_UP-lin                                                                              
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = min(fl.Up(l_b), fsm.Up(sc,ml)); #fucl_UP-lin  
+                                    display "after update";                                       
+                                    display fl.Up, fl.Lo, fsm.Up;
+                                    #
+                                    Solve TWN_RP_PN_Abt using MIP minimizing objval;
+                                    Abt_Count = Abt_Count + 1;
+                                    #
+                                    #还原变量边界
+                                    fl.Up(l_b) = FlUp_temp(l_b); 
+                                    fl.Lo(l_b) = FlLo_temp(l_b); 
+                                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = FsmUp_temp(sl,mj); 
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = FsmUp_temp(sl,ml);
+                                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = FsmUp_temp(sl,mc);
+                                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = FsmUp_temp(sl,mf);                                        
+                                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = FsmUp_temp(sl,ml);
+                                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = FsmUp_temp(sc,ml);
+                                    #display "after restore";
+                                    #display fl.Up, fl.Lo, fsm.Up;
+                                    #display Interval;
+                                    #display objval.L,TWN_RP_PN_Abt.objest;
+                                    if(TWN_RP_PN_Abt.objest > UB, Yfl_pwu_Bt(l_b,np)$(ord(np)=Interval)=0; );#如果可紧缩记录下对应的区间值,继续执行紧缩
+                                    #display Yfl_pwu_Bt;
+                                    yfl_pwu.Up(l_b,np)$(ord(np)=Interval) = 1;#还原
+                                    yfl_pwu.Lo(l_b,np)$(ord(np)=Interval) = 0;#还原
+                                    #提前终止Abt方法:如果待紧缩变量最远侧子区间无法消减(对于靠近下边界，最远侧是子区间Npwu_l_U)，则跳出所有边界紧缩过程，优先判断
+                                    break$sum(np$(ord(np)=Interval and l_np(l_b,np) and ord(np)=1), Yfl_pwu_Bt(l_b,np)) 3;
+                                    #如果没实现子区间的紧缩,则跳出子区间紧缩
+                                    break$sum(np$(ord(np)=Interval and l_np(l_b,np)), Yfl_pwu_Bt(l_b,np)); 
+                                );
+                            );
+                            # Step 4.2 ------ 如果实现了变量的边界紧缩（没有两次跳出发生）则更新分割方案和变量的边界以及辅助参数
+                            #
+                            display "-before contraction---"
+                            #
+                            display fl.Up, fl.Lo, fsm.Up;
+                            fl.Up(l_b) = smax(np$Yfl_pwu_Bt(l_b,np), FlnUp_pwu(l_b,np));
+                            fl.Lo(l_b) = smin(np$Yfl_pwu_Bt(l_b,np), FlnLo_pwu(l_b,np));
+                            #执行边界直接传播，增加对变量域(fsm)的更新和更新相关其他变量(yl)的边界更新
+                            #更新flj,fluc,fluf,fll-lout,fll-lin,fucl-lin边界
+                            fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mj)); #flj_UP 
+                            fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,ml)); #fll_UP-lout                                         
+                            fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mc)); #fluc_UP                                     
+                            fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf) and lout(l_b,sl)) = min(fl.Up(l_b), fsm.Up(sl,mf)); #fluf_UP                                         
+                            fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml) and lin(ml,l_b)) = min(fl.Up(l_b), fsm.Up(sl,ml)); #fll_UP-lin                                                                              
+                            fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml) and lin(ml,l_b)) = min(fl.Up(l_b), fsm.Up(sc,ml)); #fucl_UP-lin                                 
+                            #
+                            display "-after contraction---"
+                            #
+                            display fl.Up, fl.Lo, fsm.Up;
+                            #先更新子区间边界，再更新分割点比较好
+                            Count_bt = 0;
+                            loop(np$(l_np(l_b,np) and Yfl_pwu_Bt(l_b,np)),
+                                Count_bt = Count_bt +1;
+                                FlnUp_pwu(l_b,np_a)$(ord(np_a)=Count_bt) = FlnUp_pwu(l_b,np);
+                                FlnLo_pwu(l_b,np_a)$(ord(np_a)=Count_bt) = FlnLo_pwu(l_b,np);   
+                            );                                    
+                            #清零原来的子区间多余边界值#,原来的多余分割点值
+                            FlnUp_pwu(l_b,np)$(ord(np)>Count_bt and ord(np)<=Npwu_l_U(l_b)) = 0;
+                            FlnLo_pwu(l_b,np)$(ord(np)>Count_bt and ord(np)<=Npwu_l_U(l_b)) = 0;
+                            Flq_pwu(l_b,qp)$(ord(qp)>(Count_bt+1) and ord(qp)<=(Npwu_l_U(l_b)+1)) = 0;
+                            #更新Npwu_l_U,l_np,l_qp,Flq_pwu,Npwu_l_LSol,Npwu_l_USol
+                            Npwu_l_U(l_b) = sum(np$l_np(l_b,np), Yfl_pwu_Bt(l_b,np));
+                            l_np(l_b,np) = yes$(ord(np) <= Npwu_l_U(l_b));
+                            l_qp(l_b,qp) = yes$(ord(qp) <= (Npwu_l_U(l_b) + 1));
+                            Flq_pwu(l_b,qp)$(l_qp(l_b,qp) and ord(qp)<=Npwu_l_U(l_b)) =
+                                sum(np$(l_np(l_b,np) and ord(np)=ord(qp)),FlnLo_pwu(l_b,np));
+                            Flq_pwu(l_b,qp)$(l_qp(l_b,qp) and ord(qp)=(Npwu_l_U(l_b)+1)) =
+                                sum(np$(l_np(l_b,np) and ord(np)=(ord(qp)-1)),FlnUp_pwu(l_b,np));
+                            Npwu_l_LSol(l_b) = sum(np$(FlnUp_pwu(l_b,np) >= Fl_LSol(l_b)
+                                                           and FlnLo_pwu(l_b,np) <= Fl_LSol(l_b)
+                                                           and l_np(l_b,np)), ord(np));
+                            Npwu_l_USol(l_b) = sum(np$(FlnUp_pwu(l_b,np) >= Fl_USol(l_b)*1E-3
+                                                           and FlnLo_pwu(l_b,np) <= Fl_USol(l_b)*1E-3
+                                                           and l_np(l_b,np)), ord(np));
+                            #
+                            display "-after bt for the current fl variable---", Npwu_l_U, FlnUp_pwu, FlnLo_pwu, Flq_pwu, Npwu_l_USol, Npwu_l_LSol, l_np, fl.Up, fl.Lo;
+                            #-------------------------------                            
+                            l_abt(l_b) = no;
+                            display "-remaining fl variables to implement abt---",l_abt;
+                        );
+                        #如果l_abt是空集，则跳出iter_abt_pcout
+                        break$(card(l_abt)=0);                        
+                    );
+                    
+                    #记录紧缩的总子区间数, abt总的执行时间和紧缩变量数
+                    Report_go(itergo, 'Abt_parti_redu') = sum((l,c),Npmr_l_U_temp(l,c))-sum((l,c),Npmr_l_U(l,c))
+                                                          +sum((uc,c),Npmr_uc_U_temp(uc,c))-sum((uc,c),Npmr_uc_U(uc,c))
+                                                          +sum(l,Npwu_l_U_temp(l))-sum(l,Npwu_l_U(l));
+                    Report_go(itergo, 'Abt_time') = timeExec-Time_start_abt;
+                    Report_go(itergo, 'Abt_Count') = Abt_Count;
+                    #执行完本轮次Abt后的变量边界
+                    display "bounds of variablrs after this round abt", plcout.Up, plcout.Lo, puccout.Up, puccout.Lo, fsm.Up, fsm.Lo;
+                    #further update the upper bounds of fsm  in BL terms with new pcout bounds in both sides and all cs
+                    #fsc-m, fsl-m  ----- 效果，没有很明显
+                    fsm.Up(sc,mj)$(asm(sc,mj) and not ssm(sc,mj)) =
+                        min(fsm.Up(sc,mj), (sum(uf, Fufout(uf))+sum(uc, FucU(uc)))*smin(c_b, sum(j$jin(mj,j),PjcU(j,c_b)/max(PjcU(j,c_b), sum(uc_b$uout(uc_b,sc), puccout.Lo(uc_b,c_b)))))  ); #fucj_UP 
+                    fsm.Up(sc,ml)$(asm(sc,ml) and not ssm(sc,ml)) =
+                        min(fsm.Up(sc,ml), sum(la$lin(ml,la),fl.Up(la)*smin(c_b, plcout.Up(la,c_b)/max(plcout.Up(la,c_b), sum(uc_b$uout(uc_b,sc), puccout.Lo(uc_b,c_b)) *(1-Rlc(la,c_b))))    )); #fucl_UP-uout                                         
+                    fsm.Up(sc,mc)$(asm(sc,mc) and not ssm(sc,mc)) =
+                        min(fsm.Up(sc,mc), sum(uc$uin(mc,uc), FucU(uc)*smin(c_b, (1$(not max(PucinU(uc,c_b), sum(uc_b$uout(uc_b,sc), puccout.Lo(uc_b,c_b))   ))
+                                                                                  + (PucinU(uc,c_b)/max(PucinU(uc,c_b), sum(uc_b$uout(uc_b,sc), puccout.Lo(uc_b,c_b)) ))$(max(PucinU(uc,c_b), sum(uc_b$uout(uc_b,sc), puccout.Lo(uc_b,c_b)) )))  )  )); #fluc_UP   , PucinU(uc,c_b)也该跟puccout更新                                      
+                    fsm.Up(sc,mf)$(asm(sc,mf) and not ssm(sc,mf)) =
+                        min(fsm.Up(sc,mf), sum(uf$uin(mf,uf), Fufin(uf)*smin(c_b, (1$(not max(PucinU(uf,c_b), sum(uc_b$uout(uc_b,sc), puccout.Lo(uc_b,c_b)) ))
+                                                                                  + (PucinU(uf,c_b)/max(PucinU(uf,c_b), sum(uc_b$uout(uc_b,sc), puccout.Lo(uc_b,c_b)) ))$(max(PucinU(uf,c_b), sum(uc_b$uout(uc_b,sc), puccout.Lo(uc_b,c_b)) ))) )   )); #fluf_UP                                         
+                                                
+                    fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj)) =
+                        min(fsm.Up(sl,mj),(sum(uf, Fufout(uf))+sum(uc, FucU(uc)))*smin(c_b, sum(j$jin(mj,j),PjcU(j,c_b)/max(PjcU(j,c_b), sum(l_b$lout(l_b,sl),plcout.Lo(l_b,c_b))  ))  ) ); #flj_UP 
+                    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml)) =
+                        min(fsm.Up(sl,ml), sum(la$lin(ml,la),fl.Up(la)*smin(c_b, plcout.Up(la,c_b)/max(plcout.Up(la,c_b), sum(l_b$lout(l_b,sl),plcout.Lo(l_b,c_b))*(1-Rlc(la,c_b))) )   )); #fll_UP-lout                                         
+                    fsm.Up(sl,mc)$(asm(sl,mc) and not ssm(sl,mc)) =
+                        min(fsm.Up(sl,mc), sum(uc$uin(mc,uc), FucU(uc)*smin(c_b, (1$(not max(PucinU(uc,c_b), sum(l_b$lout(l_b,sl),plcout.Lo(l_b,c_b)) ))
+                                                                                  + (PucinU(uc,c_b)/max(PucinU(uc,c_b), sum(l_b$lout(l_b,sl),plcout.Lo(l_b,c_b))))$(max(PucinU(uc,c_b), sum(l_b$lout(l_b,sl),plcout.Lo(l_b,c_b)))) )   ) )); #fluc_UP   , PucinU(uc,c_b)也该跟puccout更新                                      
+                    fsm.Up(sl,mf)$(asm(sl,mf) and not ssm(sl,mf)) =
+                        min(fsm.Up(sl,mf),sum(uf$uin(mf,uf), Fufin(uf)*smin(c_b, (1$(not max(PucinU(uf,c_b), sum(l_b$lout(l_b,sl),plcout.Lo(l_b,c_b))))
+                                                                                  + (PucinU(uf,c_b)/max(PucinU(uf,c_b), sum(l_b$lout(l_b,sl),plcout.Lo(l_b,c_b))))$(max(PucinU(uf,c_b), sum(l_b$lout(l_b,sl),plcout.Lo(l_b,c_b))))  )   ) )); #fluf_UP                                         
+                                        
+                    display 'further update the upper bounds of fsm',fsm.Up;
+                );
+            );
+            
+           
+            
+
+            #---------------------------------------------------------------------------------------
+            #------------------------ GO-Step 3：Dynamic strengh the RP using PMR ------------------
+            #---------------------------------------------------------------------------------------
+            #Update dynamic partitions
+            #更新分割区间数-对于每轮偏差值大于Dynamic_factor的都进行分割
+            #--plout
+            Npmr_l_U(l,c)$(Plcout_BLsum_devi(l,c) > Devi_BL_Ave*Dynamic_factor) = Npmr_l_U(l,c) + Nd_dynamic;
+            #更新分割集合,分割点-基于动态均匀二分
+            l_c_np(l,c,np) = yes$(ord(np) <= Npmr_l_U(l,c));
+            l_c_qp(l,c,qp) = yes$(ord(qp) <= (Npmr_l_U(l,c) + 1));
+            #method 1:增加Nd_dynamic个分割点，均匀分割子区间的通用写法+基于动态调节因子  Devi_BL_Ave, Devi_FLalpha_Ave
+            Plcoutq_pmr(l,c,qp)$(l_c_qp(l,c,qp) and (ord(qp) <= Npmr_l_LSol(l,c) ) and (Plcout_BLsum_devi(l,c) > Devi_BL_Ave*Dynamic_factor)) = Plcoutq_pmr(l,c,qp);
+            Plcoutq_pmr(l,c,qp)$(l_c_qp(l,c,qp) and (ord(qp) > (Npmr_l_LSol(l,c) + Nd_dynamic)) and (Plcout_BLsum_devi(l,c) > Devi_BL_Ave*Dynamic_factor)) = Plcoutq_pmr(l,c,qp - Nd_dynamic);
+            Plcoutq_pmr(l,c,qp)$(l_c_qp(l,c,qp) and ((ord(qp) > Npmr_l_LSol(l,c)) and (ord(qp) <= (Npmr_l_LSol(l,c) + Nd_dynamic))) and (Plcout_BLsum_devi(l,c) > Devi_BL_Ave*Dynamic_factor)) = 
+                sum(qp_a$(ord(qp_a) = Npmr_l_LSol(l,c)), Plcoutq_pmr(l,c,qp_a))                                                                                                           
+                +(sum(qp_a$(ord(qp_a) = Npmr_l_LSol(l,c) + Nd_dynamic + 1), Plcoutq_pmr(l,c,qp_a)) - sum(qp_a$(ord(qp_a) = Npmr_l_LSol(l,c)), Plcoutq_pmr(l,c,qp_a)))/(Nd_dynamic + 1)*(ord(qp) - Npmr_l_LSol(l,c));
+            PlcoutnUp_pmr(l,c,np)$l_c_np(l,c,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Plcoutq_pmr(l,c,qp));
+            PlcoutnLo_pmr(l,c,np)$l_c_np(l,c,np) = sum(qp$(ord(qp) = ord(np)), Plcoutq_pmr(l,c,qp));
+            #display Npmr_l_U, Plcoutq_pmr;
+            #--puccout
+            Npmr_uc_U(uc,c)$(Puccout_BLsum_devi(uc,c) > Devi_BL_Ave*Dynamic_factor) = Npmr_uc_U(uc,c) + Nd_dynamic;
+            uc_c_np(uc,c,np) = yes$(ord(np) <= Npmr_uc_U(uc,c));
+            uc_c_qp(uc,c,qp) = yes$(ord(qp) <= (Npmr_uc_U(uc,c) + 1));
+            Puccoutq_pmr(uc,c,qp)$(uc_c_qp(uc,c,qp) and (ord(qp) <= Npmr_uc_LSol(uc,c) ) and (Puccout_BLsum_devi(uc,c) > Devi_BL_Ave*Dynamic_factor)) = Puccoutq_pmr(uc,c,qp);
+            Puccoutq_pmr(uc,c,qp)$(uc_c_qp(uc,c,qp) and (ord(qp) > (Npmr_uc_LSol(uc,c) + Nd_dynamic)) and (Puccout_BLsum_devi(uc,c) > Devi_BL_Ave*Dynamic_factor)) = Puccoutq_pmr(uc,c,qp - Nd_dynamic);
+            Puccoutq_pmr(uc,c,qp)$(uc_c_qp(uc,c,qp) and ((ord(qp) > Npmr_uc_LSol(uc,c)) and (ord(qp) <= (Npmr_uc_LSol(uc,c) + Nd_dynamic))) and (Puccout_BLsum_devi(uc,c) > Devi_BL_Ave*Dynamic_factor)) = 
+                sum(qp_a$(ord(qp_a) = Npmr_uc_LSol(uc,c)), Puccoutq_pmr(uc,c,qp_a))                                                                                                           
+                +(sum(qp_a$(ord(qp_a) = Npmr_uc_LSol(uc,c) + Nd_dynamic + 1), Puccoutq_pmr(uc,c,qp_a)) - sum(qp_a$(ord(qp_a) = Npmr_uc_LSol(uc,c)), Puccoutq_pmr(uc,c,qp_a)))/(Nd_dynamic + 1)*(ord(qp) - Npmr_uc_LSol(uc,c));
+            PuccoutnUp_pmr(uc,c,np)$uc_c_np(uc,c,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Puccoutq_pmr(uc,c,qp));
+            PuccoutnLo_pmr(uc,c,np)$uc_c_np(uc,c,np) = sum(qp$(ord(qp) = ord(np)), Puccoutq_pmr(uc,c,qp));
+            #display Npmr_uc_U, Puccoutq_pmr;         
+            #--fl
+            if(YNL_alpha,
+                Npwu_l_U(l)$(Fl_alpha_devi(l) > Devi_FLalpha_Ave*Dynamic_factor) = Npwu_l_U(l) + Nd_dynamic;
+                l_np(l,np) = yes$(ord(np) <= Npwu_l_U(l));
+                l_qp(l,qp) = yes$(ord(qp) <= (Npwu_l_U(l) + 1));
+                Flq_pwu(l,qp)$(l_qp(l,qp) and (ord(qp) <= Npwu_l_LSol(l) ) and (Fl_alpha_devi(l) > Devi_FLalpha_Ave*Dynamic_factor)) = Flq_pwu(l,qp);
+                Flq_pwu(l,qp)$(l_qp(l,qp) and (ord(qp) > (Npwu_l_LSol(l) + Nd_dynamic)) and (Fl_alpha_devi(l) > Devi_FLalpha_Ave*Dynamic_factor)) = Flq_pwu(l,qp - Nd_dynamic);
+                #均匀二分                
+*                Flq_pwu(l,qp)$(l_qp(l,qp) and ((ord(qp) > Npwu_l_LSol(l)) and (ord(qp) <= (Npwu_l_LSol(l) + Nd_dynamic))) and (Fl_alpha_devi(l) > Devi_FLalpha_Ave*Dynamic_factor)) = 
+*                    sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l)), Flq_pwu(l,qp_a))                                                                                                           
+*                    +(sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l) + Nd_dynamic + 1), Flq_pwu(l,qp_a)) - sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l)), Flq_pwu(l,qp_a)))/(Nd_dynamic + 1)*(ord(qp) - Npwu_l_LSol(l));
+                #最优二分
+                Flq_pwu(l,qp)$(l_qp(l,qp) and ((ord(qp) > Npwu_l_LSol(l)) and (ord(qp) <= (Npwu_l_LSol(l) + Nd_dynamic))) and (Fl_alpha_devi(l) > Devi_FLalpha_Ave*Dynamic_factor)) =                                                                                                       
+                    ((sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l) + Nd_dynamic + 1), Flq_pwu(l,qp_a))-sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l)), Flq_pwu(l,qp_a)))*Alpha(l)/
+                    (sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l) + Nd_dynamic + 1), Flq_pwu(l,qp_a))**Alpha(l)-sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l)), Flq_pwu(l,qp_a))**Alpha(l)))**(1/(1-Alpha(l))); 
+
+                #XUP = sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l) + Nd_dynamic + 1), Flq_pwu(l,qp_a))
+                #XLO = sum(qp_a$(ord(qp_a) = Npwu_l_LSol(l)), Flq_pwu(l,qp_a))
+
+                FlnUp_pwu(l,np)$l_np(l,np) = sum(qp$(ord(qp) = (ord(np) + 1)), Flq_pwu(l,qp));
+                FlnLo_pwu(l,np)$l_np(l,np) = sum(qp$(ord(qp) = ord(np)), Flq_pwu(l,qp));
+                Fl_Slope_pwu(l,np)$l_np(l,np) = (FlnUp_pwu(l,np)**Alpha(l)-FlnLo_pwu(l,np)**Alpha(l))/(FlnUp_pwu(l,np)-FlnLo_pwu(l,np)); 
+                Fl_Intercept_pwu(l,np)$l_np(l,np) = FlnLo_pwu(l,np)**Alpha(l) - Fl_Slope_pwu(l,np)*FlnLo_pwu(l,np);
+                #display Npwu_l_U, Flq_pwu, Fl_Slope_pwu, Fl_Intercept_pwu;
+            );
+            
+
+            #严格的集合控制，不需要清零数据，不影响中间变量的正确更新
+        );
+    );
+
+
+
+    #============Result log===========
+    Report(case,'Ttime') = timeExec-Time_start_1;#Totaltime
+    Report(case,'Time234') = timeExec-Time_start_2;
+    Report(case,'Time4') = sum(itergo, Report_go(itergo, 'Abt_time'));
+    Report(case,'Time23') =Report(case,'Time234')-Report(case,'Time4');
+    Report(case,'ObjVal') = UB;
+    Report(case,'ObjEst') = LB;
+    Report(case,'Gap') = Gap;   
+    Report(case,'Iteration2') = sum(itergo$Report_go(itergo, 'Partitions'), 1);
+    Report(case,'NumParvar') = card(uc)*card(c)+card(l)*card(c)+YNL_alpha*card(l);
+    Report(case,'Partitions') = sum(itergo$(ord(itergo)=Report(case,'Iteration2')), Report_go(itergo, 'Partitions'));
+    Report(case,'NumBL') = card(c)*(card(l)+card(uc))*(card(u)+card(l)+card(j)-1+Yunitselfrecycled);
+    Report(case,'NumNL_alpha')$YNL_alpha = card(l); 
+    Report(case,'NumEqu') = TWN.numEqu-1;
+    Report(case,'NumVar') = TWN.numVar-1;
+    Report(case,'NumDVar') = TWN.numDVar;
+    Report(case,'NumR') = card(r);
+    Report(case,'NumU') = card(u);
+    Report(case,'NumL') = card(l);
+    Report(case,'NumUC') = card(uc);
+    Report(case,'NumUF') = card(uf);
+    Report(case,'NumC') = card(c);
+    
+
+    
+
+
+
+
+
+    #如果找到可行解，也输出
+    if(Gap > Gap_Tol and UB<+INF,
+        #display '============================================================================================================================';
+        display 'the feasible soution is found!';
+        #display UB, Fsm_USol, Fuc_USol, Puccin_USol, Puccout_USol, Fl_USol, Plcout_USol, Fj_USol, Pjc_USol, Fucc_delta;
+        #display Fru_USol, Fuu_USol, Ful_USol, Fuj_USol, Flu_USol, Fll_USol, Flj_USol;
+        #display puccout.UP,puccout.LO,Puccout_USol, plcout.UP, plcout.LO,Plcout_USol;
+        #display '=============================================================================================================================';
+        #display  Npmr_l_U;
+        TWN.optfile = 0;#还原
+        putclose bbcontrol 'mipstopexpr resusd >= 10000000';#还原
+        TWN_RP_PN_Abt.optfile = 0;#还原
+    );
+    display Report_go;
+    display Report_mul;
+    #清理参数和变量当前值和边界设定 避免影响下个算例的计算
+    option
+        clear = sol
+        clear = Objvalcou
+        clear = Freq
+        clear = Report_go
+        clear = Report_mul
+        clear = fsm
+        clear = puccout
+        clear = plcout
+        clear = Fsm_USol
+        clear = Fl_USol
+        clear = Plcout_USol
+        clear = Fuc_USol
+        clear = Puccin_USol
+        clear = Puccout_USol
+        clear = Fj_USol
+        clear = Pjc_USol
+        clear = Fru_USol
+        clear = Fuu_USol
+        clear = Ful_USol
+        clear = Fuj_USol
+        clear = Flu_USol
+        clear = Fll_USol
+        clear = Flj_USol
+    ;
+);
+*======================Step 1: solving the case model===========
+#
+display Report;
+*--------Export to Excel using GDX utilities---------
+*embeddedCode Connect:
+*- GAMSReader:
+*    symbols:
+*      - name: Report
+*- PandasExcelWriter:
+*    file: 0906TWN_GO.xlsx
+*    symbols:
+*      - name: Report
+*        range: Report!A1
+*endEmbeddedCode
+
