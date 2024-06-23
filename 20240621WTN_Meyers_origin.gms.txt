@@ -1,0 +1,972 @@
+$Title  WTN_models
+$ontext
+*--- 废水处理网络最优化设计模型：
+*--- 案例数据取自Castro 2007等Ex1-Ex9 Teles 2012Ex10-Ex16 , 16个基本算例
+*--- 案例数据取Misener me 2010等 Ex17-Ex20:me4-20, 4个算例
+*--- WTN Problem默认采用P formulation，
+*--- 基于洞察超结构给定变量初始边界
+*--- 默认水处理容量满足最大的需求量，所以不进行限制。
+*--- 基于随机多起点NLP局部优化获得高质量可行解
+*--- 大规模算例激活多起点局部优化，否则不激活
+*--- 算法写完后，记得将普通的wtn和广义问题分开
+*--- 不同算例的已知最优解, BL项数
+    Ex1 59.80 
+    Ex2 130.70 
+    Ex3 99.49 
+    Ex4 89.84 
+    Ex5 229.70 
+    Ex6 173.48 
+    Ex7 80.78 
+    Ex8 109.45 
+    Ex9 124.36, 180
+    Ex10 586.68 
+    Ex11 2127.12 
+    Ex12 1201.04 
+    Ex13 1564.96 
+    Ex14 513.00 
+    Ex15 2446.43 
+    Ex16 1358.66
+    Ex17 me 4,  1086187.1368,   48
+    Ex18 me 10, 1086187.1368,   300
+    Ex19 me 15, 943734.043623,  675
+    Ex20 me 20, 1416366.94,    1260 #注意me20包括两个水阱，有容量限制，其他都是单个水阱
+--更新日志：
+    7月20日：重新整理代码，基于asm的集合
+    7月21日：多起点搜索停止规则简化，给一个最大迭代次数即可
+    7月22日：完成了GO算法主体第第二三步，还需要考虑初始化方法交互(没必要），二元变量自适应松弛以及第四步的自适应边界紧缩
+    7月23日：添加了Dicopt在gap很小时，切换为模式2，固定初始拓扑结构为松弛问题解的过程；多起点搜索和初始化交互都是可选择的，并不是必须项
+            p12约束改进and asm(s_,ma_) and asm(sa_,m_)
+            #测试了下二元变量的适应性松弛，效果不好，增加了迭代伦次，和分割变量数，求解时间反而大幅增加，这与原问题中管线解的稀疏性有关，所以没必要松弛
+            #还需要考虑的只剩下原问题解初始化松弛问题以及边界紧缩
+    7月24日：代码完善，加入求解时间约束，和一次切换dicopt模式，搞定了紧缩框架
+    7月25日：初步搞定了边界紧缩的核心部分，以及基于稳健消减策略的执行部分，边界消减策略可以采用激进的策略，未写代码（暂不考虑）
+               1区间消减可能性要同时考虑上下界解所在区间无法消减(已搞定)
+               2边界消减问题没必要求到最优解！（待搞定）
+               3紧缩上下界优先的选择
+               4进入Abt的条件(已搞定)
+               5离开Abt的条件(已搞定)
+            紧缩策略：先紧缩区间数多的，然后中途发现一个变量最远侧区间无法紧缩，则直接跳出紧缩过程（一个折中的紧缩方案）
+            报告：每一轮次总的消减区间数
+    7月26日：搞定了稳健的Abt执行，改进Abt问题的求解终止条件（不必求到最优）
+            Debug:左侧紧缩时，第一个区间是1不是NU
+    7月27日： 更新边界紧缩的执行策略
+            如果是全部都走一遍，还是有可能出现很多次的无法紧缩，所以在紧缩一步，如果发现一个变量无法紧缩，直接跳出紧缩过程，而不是执行下一个变量。
+            改为只紧缩远端的区间，这样效率更高，即使这轮不紧缩近端，下轮就会紧缩另一侧了，减少无效的紧缩执行
+            1 执行变量的顺序不变，还是分割区间数多，偏差大
+            2 只紧缩远端的子区间，如果无法紧缩则直接结束abt
+            3 只对分割区间数大于限定值的变量进行紧缩
+           目前看，这个Abt效率是最高的，不再更改Abt策略了，并且发现动态分割效率已经非常搞了，abt其实用处不大。
+           完成了Abt过程的代码，进行了debug
+    8月14日： 加入Abt过程动态边界更新部分和二元变量推导存在性：
+            基于分支流fsm基于两侧浓度边界更新边界和逻辑推导yl
+    8月15日： 加入abt紧缩后动态边界更新部分和二元变量推导存在性：
+            基于分支流fsm基于两侧浓度边界更新边界和逻辑推导yl
+
+    8月22日：Display的时间和格式调整
+    11月28日：更改了终止条件和下界计算方式（统一为Gap满足或者RP求解时间超时）
+    11月30日：简化ABt代码，只执行分割变量的紧缩，不考虑边界传播了，目前对单个变量的紧缩策略是只紧缩远端区间数较多的部分，
+             优先紧缩分割区间数多的变量, 如果出现待紧缩的变量无法紧缩，则停止该轮紧缩过程。还有不限制参与紧缩的变量必须分割区间数必须大于某值，都可以参与紧缩
+    12月5日：更新代码，控制Step2的总体求解时间为不超过定值，预处理和边界紧缩时间不控制。
+$offtext
+$eolcom #
+*==============================================================================
+Option solprint = on ;
+Option sysout   = off ;
+option LP       = Cplex;# Gurobi, Odhcplex, Cplex
+option MIP      = Cplex;# Gurobi, Odhcplex, Cplex
+option MIQCP    = Baron;# Gurobi, Baron, Dicopt
+option NLP      = Baron;# Conopt, Baron
+option QCP      = Baron;# Gurobi, Baron, Conopt
+option MINLP    = Baron;# Gurobi, Baron, Conopt, Convert, Dicopt
+option Optcr    = 1E-3;    # eps_{OPT TOL} = 1 * 10^-3
+option Reslim   = 3600;# 1 hour time limit
+option Decimals = 3;
+option Threads  = 1;
+option bratio = 1;#不使用初始点作为求解器的基
+*==========================代码块==============================================
+$onEcho > WTN_models.gms
+*========================Part 1: Abstract model ================================================
+*Sets, Parameters, variablbes and equations declared on total Set
+*Problem Topology
+Sets
+    case 'case index'
+    i_ 'Effluent source' 
+    j_ 'Discharge sinks'         
+    l_ 'Treatment units'            
+    c_ 'Components'
+    s_ 'Splitters'
+    m_ 'Mixers'
+;
+Sets
+    i(i_)  'Instance of effluent source'  
+    j(j_)  'Instance of discharge sinks'
+    l(l_)  'Instance of treatment units' 
+    c(c_)  'Instance of Components'
+    s(s_)  'Instance of Splitters'
+    m(m_)  'Instance of Mixers'
+    si(s_) 'Instance of Splitters at the outlet of effluent sources'
+    sl(s_) 'Instance of Splitters at the outlet of treatment units'
+    mj(m_) 'Instance of Mixers at the inlet of discharge sinks'
+    ml(m_) 'Instance of Mixers at the inlet of treatment units'
+;
+Sets
+    iout(i_,s_) 'Allowable connection between i and s'  
+    lout(l_,s_) 'Allowable connection between l and s'  
+    lin(m_,l_)  'Allowable connection between m and l'
+    jin(m_,j_)  'Allowable connection between m and j'
+    asm(s_,m_)  'Allowable connection from s to m'
+    ssm(s_,m_)  'self-cycle connection from s to m for the same unit'
+;
+Alias (i,ia),(l,la),(sl,sla),(c,ca);
+Alias (s_,sa_),(m_,ma_);
+*==============================================================================
+Scalar
+    Kloopt           'ratio of flowrate of total flow of cyclic of any treatment unit l to the sum of flowrate of total flow of effluent source i'
+    Nu               'Unit convert coefficient in generalized pooling problems'  /3600/
+    VC_pipe          'Capital Cost coefficient of pipeline (s,m) of the variable part, $/(m*t/h*y)' /3603.4/ # me
+    FC_pipe          'Capital Cost coefficient of pipeline (s,m) of the fixed part, $/(m*t/h*y)'  /124.6/#0.2-5 me
+    FpipeUp          'addtitional limitation of maximum allowable water flowrate of the pipe, t/h' /1E+4/#a big enough number
+    FpipeLo          'addtitional limitation of minimum allowable water flowrate of the pipe, t/h' /0.2/#0.2me,1,5Baga 
+
+Parameters
+    Fi(i_)           'Flowrate of total flow of effluent source i, t/h'      
+    Pic(i_,c_)       'Concentration of component c of effluent source i, 10^3 ppm'
+    Rlc(l_,c_)       'Removal ratio of component c of treatment unit l'
+    PlcinU(l_,c_)    'Upper bound of concentration of component c at the inlet of treatment unit l, 10^3 ppm'
+    PjcU(j_,c_)      'Upper bound of concentration of component c at the inlet of discharge sink j, 10^3 ppm'
+    OCl(l_)          'investment cost coefficient for treatment unit l'
+    ICl(l_)          'operating cost coefficient for treatment unit l'
+    D_pipe(s_,m_)    'length of the pipeline (s,m), m'
+    FjU(j_)          'Flowrate upper bound of total flow of effluent sink j, t/h'
+    Ymeyer20         'is the case meyer20'
+    NlU_meyer20      'upper bound of active treatment in meyer20'
+;
+Parameters #Auxiliary Paratermeter declaration
+    Yunitselfrecycled  'is self-cylce allowable for process branch stream'
+    Ygpp               'the problem belongs to generalized pooling problem——gpp'
+    Fsm_USol(s_,m_)    'Flowrate of total flow from splitter s to mixer m, t/h'
+    Fl_USol(l_)        'Flowrate of total flow of treatment unit l, t/h'
+    Plcin_USol(l_,c_)  'Concentration of component c at the inlet of l, ppm'
+    Plcout_USol(l_,c_) 'Concentration of component c at the outlet of l, ppm'                                                
+    Pjc_USol(j_,c_)    'Concentration of component c of discharge sink j, ppm'
+    Fil_USol(i_,l_)    'Flowrate of total flow from i to l, t/h'
+    Fij_USol(i_,j_)    'Flowrate of total flow from i to j, t/h'
+    Fll_USol(l_,l_)    'Flowrate of total flow from l to ll, t/h'
+    Flj_USol(l_,j_)    'Flowrate of total flow from l to j, t/h'
+    Report(*,*)           'Report'
+    Report_mul(*,*)
+;
+
+
+*=======================================================================
+Positive Variables
+    fsm(s_,m_)      'Flowrate of total flow from splitter s to mixer m, t/h'
+    plcout(l_,c_)   'Concentration of component c at the outlet of treatment unit l, 10^3 ppm'
+    fl(l_)          'Flowrate of total flow of treatment l, t/h'
+    #Variables used only for RP model
+    fsmc(s_,m_,c_)   'Flowrate of component flow c from splitter s to mixer m, kg/h'
+;
+Binary variables
+    yl(l_) #Ygpp
+    ysm(s_,m_)#Ygpp
+;
+Variable  objval;
+*=======================================================================
+Equations
+    p0_objfun       'objective function'
+    p0_objfun_gpp   'objective function gpp'
+    p1(i_,s_)       'mass balance of total flow at si'  
+    p2(m_,l_,s_)    'mass balance of total flow at l' 
+    p3(l_,s_)       'calculation of fl(l)'
+    p4(m_,l_,s_,c_) 'mass balance of component flow c  at l'
+    p4_RP(m_,l_,s_,c_) 'mass balance of component flow c  at l'
+    p5(m_,l_,c_)    'Concentration upper bound of component  c  at lin'
+    p5_RP(m_,l_,c_)    'Concentration upper bound of component  c  at lin'
+    p6(m_,j_,c_)    'Concentration upper bound of component  c  at mjin'
+    p6_RP(m_,j_,c_)    'Concentration upper bound of component  c  at mjin'
+    p7(l_)          'Pooling Capacity constraints'                              
+    p8(s_,m_)       'Pipeline flowrate upper bound constraints'
+    p9(s_,m_)       'Pipeline flowrate lower bound constraints'
+    p10(m_,j_)      'Sink flowrate constraints'
+    p11             'Overal flowrate balance'
+    p12             'Looping between two treatment units is disallowed'
+    p13             'Meyer20 activate treatments upper bound'
+;
+
+#======================== Models (declared on total Set and defined on subSet) ================================================
+    #objective function: sum of total flowrate of treatment units 
+    p0_objfun..                                 objval =e= sum(l, fl(l));
+    p0_objfun_gpp..                             objval =e= sum(l, OCl(l)*fl(l)+ ICl(l)*yl(l))
+                                                           + sum(asm(s,m), (VC_pipe*fsm(s,m)/Nu
+                                                                           + FC_pipe*ysm(s,m))*D_pipe(s,m))          
+                                                           ;
+    
+    #mass balance of total flow at si 
+    p1(i, si)$iout(i, si)..                     Fi(i) =e= sum(m$asm(si,m), fsm(si,m));
+    
+    #mass balance of total flow at l 
+    p2(ml,l,sl)$(lin(ml,l) and lout(l,sl)) ..   sum(s$asm(s,ml), fsm(s,ml)) =e= sum(m$asm(sl,m), fsm(sl,m));
+    
+    #calculation of fl(l)
+    p3(l,sl)$(lout(l,sl))..                     fl(l) =e= sum(m$asm(sl,m), fsm(sl,m));
+    
+    #mass balance of component flow c  at l
+    p4(ml,l,sl,c)$(lout(l,sl) and lin(ml,l))..
+                                                sum(m$asm(sl,m), fsm(sl,m))*plcout(l,c) =e= (1- Rlc(l,c))*
+                                                (sum((si,i)$(iout(i,si) and asm(si,ml)), fsm(si,ml)*Pic(i,c))
+                                                + sum((la,sla)$(lout(la,sla) and asm(sla,ml)), fsm(sla,ml)*plcout(la,c)))
+                                                ;
+                                                
+    p4_RP(ml,l,sl,c)$(lout(l,sl) and lin(ml,l))..
+                                                sum(m$asm(sl,m), fsmc(sl,m,c)) =e= (1- Rlc(l,c))*
+                                                (sum((si,i)$(iout(i,si) and asm(si,ml)), fsm(si,ml)*Pic(i,c))
+                                                + sum((la,sla)$(lout(la,sla) and asm(sla,ml)), fsmc(sla,ml,c)))
+                                                ;
+    
+    #Concentration upper bound of component  c  at lin
+    p5(ml,l,c)$(lin(ml,l) and 1-Ygpp)..         sum((i,si)$(iout(i,si) and asm(si,ml)), fsm(si,ml)*Pic(i,c))
+                                                + sum((la,sl)$(lout(la,sl) and asm(sl,ml)), fsm(sl,ml)*plcout(la,c))
+                                                =l=
+                                                PlcinU(l,c)*sum(s$asm(s,ml), fsm(s,ml))
+                                                ;
+    p5_RP(ml,l,c)$(lin(ml,l) and 1-Ygpp)..      sum((i,si)$(iout(i,si) and asm(si,ml)), fsm(si,ml)*Pic(i,c))
+                                                + sum((la,sl)$(lout(la,sl) and asm(sl,ml)), fsmc(sl,ml,c))
+                                                =l=
+                                                PlcinU(l,c)*sum(s$asm(s,ml), fsm(s,ml))
+                                                ;
+                                                
+    #Concentration upper bound of component  c  at mjin
+    p6(mj,j,c)$jin(mj,j)..                      sum((i,si)$(iout(i,si) and asm(si,mj)), fsm(si,mj)*Pic(i,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,mj)), fsm(sl,mj)*plcout(l,c))
+                                                =l=
+                                                PjcU(j,c)*sum(s$asm(s,mj), fsm(s,mj));
+    
+    p6_RP(mj,j,c)$jin(mj,j)..                   sum((i,si)$(iout(i,si) and asm(si,mj)), fsm(si,mj)*Pic(i,c))
+                                                + sum((l,sl)$(lout(l,sl) and asm(sl,mj)), fsmc(sl,mj,c))
+                                                =l=
+                                                PjcU(j,c)*sum(s$asm(s,mj), fsm(s,mj));
+                                                
+    #-------Extensions:Generalized pooling problems--
+    #Pooling Capacity constraint:
+    p7(l)..                                     fl(l) =l= fl.Up(l)*yl(l);
+    #Pipeline flowrate constraints:                                           
+    p8(s,m)$asm(s,m) ..                         fsm(s,m) =l= min(FpipeUp, fsm.Up(s,m))*ysm(s,m);
+    p9(s,m)$asm(s,m)..                          fsm(s,m) =g= max(FpipeLo, fsm.Lo(s,m))*ysm(s,m);
+    
+    #Sink flowrate constraints:                                           
+    p10(mj,j)$jin(mj,j)..                       sum(s$asm(s,mj), fsm(s,mj)) =l= min(sum(i, Fi(i)),FjU(j));
+    
+    #Overall flowrate balance:                                           
+    p11..                                       sum(asm(s,mj), fsm(s,mj)) =e= sum(i, Fi(i));
+    
+    #Looping between two treatment units is disallowed:                                          
+    p12(s_,m_,sa_,ma_)$(ord(s_)<ord(sa_) and ord(s_)=ord(m_) and ord(sa_)=ord(ma_)
+                        and sl(s_) and ml(m_) and sl(sa_) and ml(ma_) and asm(s_,ma_) and asm(sa_,m_))..
+                                                ysm(s_,ma_) + ysm(sa_,m_) =l= 1;
+                                                
+    p13$Ymeyer20..                              sum(l, yl(l)) =l= NlU_meyer20;                                                                                                                                                                                   
+$offecho
+$include WTN_models
+
+Model WTN/
+    p0_objfun     
+    p1       
+    p2
+    p3
+    p4
+    p5
+    p6
+    /;
+Model WTN_gpp/
+    p0_objfun_gpp     
+    p1       
+    p2
+    p3
+    p4
+    p5
+    p6
+    p7
+    p8
+    p9
+    p10
+    p11
+    p12
+    p13
+    /;
+$onecho > Data_input.gms
+* ==================================Part 2: Data import======================
+* This part includes Set and data definition,also include bounds of Variables definition
+Sets
+    i_     /1*20/
+    j_     /1*20/
+    l_     /1*20/
+    c_     /1*20/
+    s_     /1*40/
+    m_     /1*40/
+    case   'case index'/Ex1*Ex16,me4, me10, me15, me20/;
+
+*Problem Parameters of all cases 
+Table Fi_all(case,i_)
+          1     2    3     4    5    6    7
+    Ex1   40    30   20
+    Ex2   60    20
+    Ex3   20    30   50
+    Ex4   40    40
+    Ex5   13.1  32.7 56.5
+    Ex6   13.1  32.7 56.5
+    Ex7   20    15   5
+    Ex8   19    7    8     6    17
+    Ex9   19    7    8     6    17
+    Ex10  80    60   130
+    Ex11  80    450  230   90   330
+    Ex12  90    350  200   40   130
+    Ex13  90    50   200   240  530  70
+    Ex14  50    120  70
+    Ex15  150   70   900
+    Ex16  150   270
+    me4   20    50   47.5  28   100  30   25
+    me10  20    50   47.5  28   100  30   25
+    me15  20    50   47.5  28   100  30   25
+    me20  20    50   47.5  28   100  30   25
+#         1     2    3     4    5    6    7
+; 
+Table Pic_all(case,i_,c_) 
+            1     2      3      4      5      6   
+    Ex1.1   400
+    Ex1.2   100
+    Ex1.3   30
+    Ex2.1   400
+    Ex2.2   800
+    Ex3.1   800
+    Ex3.2   400
+    Ex3.3   200
+    Ex4.1   100   20    
+    Ex4.2   15    200
+    Ex5.1   10    390    25
+    Ex5.2   110   16780  40
+    Ex5.3   100   25     35    
+    Ex6.1   10    390    250
+    Ex6.2   110   16780  400
+    Ex6.3   100   25     350
+    Ex7.1   600   500    500 
+    Ex7.2   400   200    100 
+    Ex7.3   200   1000   200 
+    Ex8.1   1100  500    500    200    800    100
+    Ex8.2   40    0      100    300    910    200
+    Ex8.3   200   220    200    500    150    0
+    Ex8.4   60    510    500    200    780    100 
+    Ex8.5   400   170    100    300    900    0
+    Ex9.1   1100  500    500    200    800    100
+    Ex9.2   40    0      100    300    910    200
+    Ex9.3   200   220    200    500    150    0
+    Ex9.4   60    510    500    200    780    100 
+    Ex9.5   400   170    100    300    900    0
+    Ex10.1  12  
+    Ex10.2  50    
+    Ex10.3  500
+    Ex11.1  12 
+    Ex11.2  50    
+    Ex11.3  500
+    Ex11.4  400  
+    Ex11.5  120
+    Ex12.1  330 
+    Ex12.2  50    
+    Ex12.3  150
+    Ex12.4  240  
+    Ex12.5  120
+    Ex13.1  12 
+    Ex13.2  350    
+    Ex13.3  500
+    Ex13.4  400  
+    Ex13.5  50
+    Ex13.6  140
+    Ex14.1  10    200
+    Ex14.2  110   140  
+    Ex14.3  100   25
+    Ex15.1  10    200    350
+    Ex15.2  110   140    100
+    Ex15.3  100   25     90
+    Ex16.1  210   700
+    Ex16.2  110   140
+    me4.1   100   500   500
+    me4.2   800   1750  2000
+    me4.3   400   80    100
+    me4.4   1200  1000  400
+    me4.5   500   700   250
+    me4.6   50    100   50
+    me4.7   1000  50    150
+    me10.1  100   500   500
+    me10.2  800   1750  2000
+    me10.3  400   80    100
+    me10.4  1200  1000  400
+    me10.5  500   700   250
+    me10.6  50    100   50
+    me10.7  1000  50    150
+    me15.1  100   500   500
+    me15.2  800   1750  2000
+    me15.3  400   80    100
+    me15.4  1200  1000  400
+    me15.5  500   700   250
+    me15.6  50    100   50
+    me15.7  1000  50    150
+    me20.1  100   500   500
+    me20.2  800   1750  2000
+    me20.3  400   80    100
+    me20.4  1200  1000  400
+    me20.5  500   700   250
+    me20.6  50    100   50
+    me20.7  1000  50    150;
+;
+#           1     2      3      4      5      6   
+
+Table PjcU_all(case,j_,c_)
+            1    2    3      4      5      6    
+    Ex1.1   20
+    Ex2.1   10
+    Ex3.1   30
+    Ex4.1   10   10
+    Ex5.1   2    2    5
+    Ex6.1   20   5    100
+    Ex7.1   100  100  100 
+    Ex8.1   100  100  100    100    100    100
+    Ex9.1   100  100  100    100    100    100
+    Ex10.1  2
+    Ex11.1  4
+    Ex12.1  10
+    Ex13.1  4
+    Ex14.1  10   5
+    Ex15.1  10   15   20
+    Ex16.1  5    15
+    me4.1   5    5    10
+    me10.1  5    5    10
+    me15.1  5    5    10
+    me20.1  5    5    10
+    me20.2  5    5    10
+;
+
+Table Rlc_all(case,l_,c_)
+            1      2      3      4      5      6
+    Ex1.1   0.99
+    Ex2.1   0.99
+    Ex2.2   0.80
+    Ex3.1   0.90
+    Ex3.2   0.99
+    Ex4.1   0.95   0
+    Ex4.2   0      0.976     
+    Ex5.1   0      0.999  0
+    Ex5.2   0.90   0.90   0.97
+    Ex5.3   0.95   0      0.20
+    Ex6.1   0      0.999  0
+    Ex6.2   0.70   0.90   0.98
+    Ex6.3   0.70   0      0.50
+    Ex7.1   0.90     
+    Ex7.2   0      0.99   0
+    Ex7.3   0      0      0.80  
+    Ex8.1   0.99   0.99  
+    Ex8.2   0      0      0.99   0.99
+    Ex8.3   0      0      0      0      0.99   0.99
+    Ex9.1   0.99   0  
+    Ex9.2   0      0.99     
+    Ex9.3   0      0      0.99     
+    Ex9.4   0      0      0      0.99   0.90
+    Ex9.5   0      0      0      0      0.99   0.99
+    Ex10.1  0.10   
+    Ex10.2  0.40         
+    Ex10.3  0.85    
+    Ex10.4  0.74     
+    Ex10.5  0.90
+    Ex11.1  0.10   
+    Ex11.2  0.40         
+    Ex11.3  0.85    
+    Ex11.4  0.74     
+    Ex11.5  0.90
+    Ex11.6  0.60     
+    Ex11.7  0.70
+    Ex12.1  0.95   
+    Ex12.2  0.80         
+    Ex12.3  0.85    
+    Ex12.4  0.12     
+    Ex12.5  0.30
+    Ex12.6  0.60     
+    Ex12.7  0.67
+    Ex12.8  0.70
+    Ex12.9  0.60     
+    Ex12.10 0.70
+    Ex13.1  0.95   
+    Ex13.2  0.20         
+    Ex13.3  0.85    
+    Ex13.4  0.74     
+    Ex13.5  0.10
+    Ex13.6  0.60     
+    Ex13.7  0.67
+    Ex13.8  0.70
+    Ex13.9  0.50     
+    Ex13.10 0.50
+    Ex13.11 0.30   
+    Ex13.12 0.88         
+    Ex13.13 0.85    
+    Ex13.14 0.74     
+    Ex13.15 0.45
+    Ex14.1  0.90   0  
+    Ex14.2  0.70   0.90        
+    Ex14.3  0      0.80
+    Ex14.4  0.50   0 
+    Ex14.5  0.65   0.60
+    Ex15.1  0.90   0      0.70
+    Ex15.2  0.70   0.90   0.40      
+    Ex15.3  0      0.80   0
+    Ex16.1  0.90   0 
+    Ex16.2  0.70   0.90      
+    Ex16.3  0      0.80
+    Ex16.4  0.50   0  
+    Ex16.5  0.90   0.70
+    Ex16.6  0.20   0.40
+#           1      2      3      4      5      6
+    me4.1   0.99   0.90   0.95
+    me4.2   0.00   0.87   0.90
+    me4.3   0.10   0.99   0.00
+    me4.4   0.7    0.2    0.3
+    me10.1  0.90   0.95   0.00
+    me10.2  0.875  0.500  0.500
+    me10.3  0.99   0.90   0.95
+    me10.4  0.00   0.75   0.75
+    me10.5  0.9    0.9    0.2
+    me10.6  0.00   0.00   0.95
+    me10.7  0.00   0.87   0.90
+    me10.8  0.995  0.000  0.000
+    me10.9  0.10   0.99   0.00
+    me10.10 0.7    0.2    0.3
+    me15.1  0.90   0.95   0.00
+    me15.2  0.875  0.500  0.500
+    me15.3  0.99   0.90   0.95
+    me15.4  0.00   0.75   0.75
+    me15.5  0.9    0.9    0.2
+    me15.6  0.00   0.00   0.95
+    me15.7  0.00   0.87   0.90
+    me15.8  0.995  0.000  0.000
+    me15.9  0.10   0.99   0.00
+    me15.10 0.7    0.2    0.3
+    me15.11 0.99   0.90   0.95
+    me15.12 0.00   0.87   0.90
+    me15.13 0.10   0.99   0.00
+    me15.14 0.7    0.2    0.3
+    me15.15 0.90   0.95   0.00    
+    me20.1  0.773  0.955  0.920
+    me20.2  0.840  0.918  0.847
+    me20.3  0.704  0.680  0.704
+    me20.4  0.790  0.877  0.689
+    me20.5  0.927  0.806  0.717
+    me20.6  0.866  0.796  0.750
+    me20.7  0.863  0.830  0.908
+    me20.8  0.981  0.785  0.946
+    me20.9  0.628  0.991  0.672
+    me20.10 0.664  0.944  0.882
+    me20.11 0.611  0.555  0.952
+    me20.12 0.640  0.684  0.848
+    me20.13 0.678  0.761  0.579
+    me20.14 0.995  0.812  0.741
+    me20.15 0.782  0.700  0.745
+    me20.16 0.652  0.811  0.892
+    me20.17 0.788  0.838  0.644
+    me20.18 0.721  0.902  0.856
+    me20.19 0.758  0.806  0.907
+    me20.20 0.577  0.821  0.573
+#           1      2      3      4      5      6
+;   
+Table PlcinU_all(case,l_,c_) #输入规定的进口杂质浓度
+#           1      2      3      4      5      6
+            1      2      3      4      5      6
+    Ex1.1   1E+5    
+    Ex2.1   200
+    Ex2.2   1000
+    Ex3.1   600
+    Ex3.2   200
+    Ex4.1   1E+5   1E+5
+    Ex4.2   1E+5   1E+5
+    Ex5.1   1E+5   1E+5   1E+5
+    Ex5.2   1E+5   1E+5   1E+5
+    Ex5.3   1E+5   1E+5   1E+5
+    Ex6.1   1E+5   1E+5   1E+5
+    Ex6.2   1E+5   1E+5   1E+5
+    Ex6.3   1E+5   1E+5   1E+5
+    Ex7.1   1E+5   1E+5   1E+5
+    Ex7.2   1E+5   1E+5   1E+5
+    Ex7.3   1E+5   1E+5   1E+5
+    Ex8.1   1E+5   1E+5   1E+5   1E+5   1E+5   1E+5
+    Ex8.2   1E+5   1E+5   1E+5   1E+5   1E+5   1E+5
+    Ex8.3   1E+5   1E+5   1E+5   1E+5   1E+5   1E+5
+    Ex9.1   1E+5   1E+5   1E+5   1E+5   1E+5   1E+5
+    Ex9.2   1E+5   1E+5   1E+5   1E+5   1E+5   1E+5
+    Ex9.3   1E+5   1E+5   1E+5   1E+5   1E+5   1E+5
+    Ex9.4   1E+5   1E+5   1E+5   1E+5   1E+5   1E+5
+    Ex9.5   1E+5   1E+5   1E+5   1E+5   1E+5   1E+5
+    Ex10.1  400   
+    Ex10.2  100         
+    Ex10.3  50    
+    Ex10.4  570    
+    Ex10.5  100
+    Ex11.1  400   
+    Ex11.2  100         
+    Ex11.3  50    
+    Ex11.4  570    
+    Ex11.5  100
+    Ex11.6  30    
+    Ex11.7  640
+    Ex12.1  30   
+    Ex12.2  100         
+    Ex12.3  50    
+    Ex12.4  227     
+    Ex12.5  100
+    Ex12.6  300     
+    Ex12.7  12
+    Ex12.8  970
+    Ex12.9  20     
+    Ex12.10 250
+    Ex13.1  300   
+    Ex13.2  10         
+    Ex13.3  500    
+    Ex13.4  570     
+    Ex13.5  100
+    Ex13.6  300     
+    Ex13.7  200
+    Ex13.8  47
+    Ex13.9  200     
+    Ex13.10 250
+    Ex13.11 136   
+    Ex13.12 50         
+    Ex13.13 100    
+    Ex13.14 270     
+    Ex13.15 10
+    Ex14.1  145    400 
+    Ex14.2  110    90     
+    Ex14.3  90     100
+    Ex14.4  200    90
+    Ex14.5  50     80
+    Ex15.1  145    400    200
+    Ex15.2  110    90     120
+    Ex15.3  90     100    300
+    Ex16.1  45     200 
+    Ex16.2  110    90      
+    Ex16.3  190    50
+    Ex16.4  200    90  
+    Ex16.5  60     500
+    Ex16.6  20     190
+#           1      2      3      4      5      6
+    me4.1   1E+5   1E+5   1E+5
+    me4.2   1E+5   1E+5   1E+5
+    me4.3   1E+5   1E+5   1E+5
+    me4.4   1E+5   1E+5   1E+5
+    me10.1  1E+5   1E+5   1E+5
+    me10.2  1E+5   1E+5   1E+5
+    me10.3  1E+5   1E+5   1E+5
+    me10.4  1E+5   1E+5   1E+5
+    me10.5  1E+5   1E+5   1E+5
+    me10.6  1E+5   1E+5   1E+5
+    me10.7  1E+5   1E+5   1E+5
+    me10.8  1E+5   1E+5   1E+5
+    me10.9  1E+5   1E+5   1E+5
+    me10.10 1E+5   1E+5   1E+5
+    me15.1  1E+5   1E+5   1E+5
+    me15.2  1E+5   1E+5   1E+5
+    me15.3  1E+5   1E+5   1E+5
+    me15.4  1E+5   1E+5   1E+5
+    me15.5  1E+5   1E+5   1E+5
+    me15.6  1E+5   1E+5   1E+5
+    me15.7  1E+5   1E+5   1E+5
+    me15.8  1E+5   1E+5   1E+5
+    me15.9  1E+5   1E+5   1E+5
+    me15.10 1E+5   1E+5   1E+5
+    me15.11 1E+5   1E+5   1E+5
+    me15.12 1E+5   1E+5   1E+5
+    me15.13 1E+5   1E+5   1E+5
+    me15.14 1E+5   1E+5   1E+5
+    me15.15 1E+5   1E+5   1E+5   
+    me20.1  1E+5   1E+5   1E+5
+    me20.2  1E+5   1E+5   1E+5
+    me20.3  1E+5   1E+5   1E+5
+    me20.4  1E+5   1E+5   1E+5
+    me20.5  1E+5   1E+5   1E+5
+    me20.6  1E+5   1E+5   1E+5
+    me20.7  1E+5   1E+5   1E+5
+    me20.8  1E+5   1E+5   1E+5
+    me20.9  1E+5   1E+5   1E+5
+    me20.10 1E+5   1E+5   1E+5
+    me20.11 1E+5   1E+5   1E+5
+    me20.12 1E+5   1E+5   1E+5
+    me20.13 1E+5   1E+5   1E+5
+    me20.14 1E+5   1E+5   1E+5
+    me20.15 1E+5   1E+5   1E+5
+    me20.16 1E+5   1E+5   1E+5
+    me20.17 1E+5   1E+5   1E+5
+    me20.18 1E+5   1E+5   1E+5
+    me20.19 1E+5   1E+5   1E+5
+    me20.20 1E+5   1E+5   1E+5
+#           1      2      3      4      5      6
+;
+
+#---Generalized pooling problem
+Table FjU_all(case,j_)      # Maximum Capacity of sink 
+             1      2
+    me4      300.5  
+    me10     300.5  
+    me15     300.5
+    me20     210    210
+;
+Table OCl_all(case,l_)    # me pool Operate Cost 
+                1       2       3       4       5
+    me4         1102.9  2895.2  1102.9  1102.9
+    me10        3860.3  2895.2  1102.9  3860.3  3860.3
+    me15        3860.3  2895.2  1102.9  3860.3  3860.3
+    me20        3400.3  1962.3  2713.7  2472.0  3282.6                                    
+       +        6       7       8       9       10
+    me10        3860.3  2895.2  2895.2  1102.9  1102.9
+    me15        3860.3  2895.2  2895.2  1102.9  1102.9
+    me20        3024.2  2412.9  1537.0  3142.8  2389.4 
+       +        11      12      13      14      15
+    me15        2205.8  3184.7  1213.2  1213.2  2702.2
+    me20        2730.9  3083.9  3343.6  2976.4  1852.5 
+       +        16      17      18      19      20         
+    me20        2311.4  3370.9  3333.8  2320.5  3287.3
+; 
+
+Table ICl_all(case,l_)   # me pool fixed Cost 
+                1       2       3       4       5
+    me4         13972   36676   13972   13972  
+    me10        48901   36676   13972   48901   48901 
+    me15        48901   36676   13972   48901   48901
+    me20        39751   36156   38034   37430   39456
+       +        6       7       8       9       10
+    me10        48901   36676   36676   13972   13972
+    me15        48901   36676   36676   13972   13972
+    me20        38810   37282   35093   39107   37224 
+       +        11      12      13      14      15
+    me15        27944   40344   15369   15369   34231
+    me20        38077   38960   39609   38691   35881
+       +        16      17      18      19      20         
+    me20        37029   39677   39585   37051   39468
+; 
+Table D_pipe_all(case,s_,m_) #Distance,m
+             1     2     3     4    5    6    7    8    9    10    11   12   13   14   15   16   17   18    19    20    21    22     
+    me4.1    0     80    210   190  75 
+    me4.2    80    0     130   100  80 
+    me4.3    210   130   0     110  160 
+    me4.4    190   100   110   0    190
+    me4.5    75    150   280   245  150
+    me4.6    55    125   260   215  135
+    me4.7    30    115   240   220  100
+    me4.8    55    140   245   245  90
+    me4.9    55    40    150   150  40
+    me4.10   40    120   230   230  70
+    me4.11   30    60    175   165  45
+#            1     2     3     4    5    6    7    8    9    10    11   12   13   14   15   16   17   18    19    20    21    22     
+    me10.1   0     20    40    50   70   70   100  160  230  190   120  
+    me10.2   20    0     30    30   60   50   80   140  215  180   95 
+    me10.3   40    30    0     40   80   60   80   140  210  190   75
+    me10.4   50    30    40    0    40   15   50   110  180  150   85
+    me10.5   70    60    80    40   0    25   50   110  180  120   120
+    me10.6   70    50    60    15   25   0    30   100  170  130   90
+    me10.7   100   80    80    50   50   30   0    60   130  100   80
+    me10.8   160   140   140   110  110  100  60   0    70   100   95
+    me10.9   230   215   210   180  180  170  130  70   0    110   160 
+    me10.10  190   180   190   150  120  130  100  100  110  0     190
+    me10.11  40    65    75    100  120  110  150  210  280  245   150 
+    me10.12  15    40    55    75   90   90   125  180  260  215   135
+    me10.13  40    35    30    65   100  85   115  170  240  220   100
+    me10.14  85    80    55    100  140  120  140  180  245  245   90  
+    me10.15  95    70    55    45   75   45   40   75   150  150   40
+    me10.16  80    70    40    90   125  100  120  150  230  230   70
+    me10.17  70    45    30    40   75   50   60   100  175  165   45    
+#            1     2     3     4    5    6    7    8    9    10    11   12   13   14   15   16   17   18    19    20    21    22     
+    me15.1   0     20    40    50   70   70   100  160  230  190   40   100  230  190  5    120
+    me15.2   20    0     30    30   60   50   80   140  215  180   30   80   215  180  20   95
+    me15.3   40    30    0     40   80   60   80   140  210  190   5    80   210  190  40   75
+    me15.4   50    30    40    0    40   15   50   110  180  150   40   50   180  150  50   85
+    me15.5   70    60    80    40   0    25   50   110  180  120   80   50   180  120  70   120
+    me15.6   70    50    60    15   25   0    30   100  170  130   60   30   170  130  70   90
+    me15.7   100   80    80    50   50   30   0    60   130  100   80   5    130  100  100  80
+    me15.8   160   140   140   110  110  100  60   0    70   100   140  60   70   100  160  95
+    me15.9   230   215   210   180  180  170  130  70   0    110   210  130  5    110  230  160
+    me15.10  190   180   190   150  120  130  100  100  110  0     190  100  110  5    190  190
+    me15.11  40    30    5     40   80   60   80   140  210  190   0    80   210  190  40   75
+    me15.12  100   80    80    50   50   30   5    60   130  100   80   0    130  100  100  80
+    me15.13  230   215   210   180  180  170  130  70   5    110   210  130  0    110  230  160
+    me15.14  190   180   190   150  120  130  100  100  110  5     190  100  110  0    190  190
+    me15.15  5     20    40    50   70   70   100  160  230  190   40   100  230  190  0    120
+    me15.16  40    65    75    100  120  110  150  210  280  245   75   150  280  245  40   150
+    me15.17  15    40    55    75   90   90   125  180  260  215   55   125  260  215  15   135
+    me15.18  40    35    30    65   100  85   115  170  240  220   30   115  240  220  40   100
+    me15.19  85    80    55    100  140  120  140  180  245  245   55   140  245  245  85   90
+    me15.20  95    70    55    45   75   45   40   75   150  150   55   40   150  150  95   40
+    me15.21  80    70    40    90   125  100  120  150  230  230   40   120  230  230  80   70
+    me15.22  70    45    30    40   75   50   60   100  175  165   30   60   175  165  70   45
+#            1     2     3     4    5    6    7    8    9    10    11   12   13   14   15   16   17   18    19    20    21    22      
+    me20.1   0     3.9   7.9   11.8 15.8 19.7 23.7 27.6 31.6 35.5  39.5 43.4 47.4 51.3 55.3 59.2 63.2 67.1  71.0  75.0  79.0  90.1 
+    me20.2   3.9   0     3.9   7.9  11.8 15.8 19.7 23.7 27.6 31.6  35.5 39.5 43.4 47.4 51.3 55.3 59.2 63.2  67.1  71.0  77.9  88.0
+    me20.3   7.9   3.9   0     3.9  7.9  11.8 15.8 19.7 23.7 27.6  31.6 35.5 39.5 43.4 47.4 51.3 55.3 59.2  63.2  67.1  76.9  86.0
+    me20.4   11.8  7.9   3.9   0    3.9  7.9  11.8 15.8 19.7 23.7  27.6 31.6 35.5 39.5 43.4 47.4 51.3 55.3  59.2  63.2  76.1  84.1
+    me20.5   15.8  11.8  7.9   3.9  0    3.9  7.9  11.8 15.8 19.7  23.7 27.6 31.6 35.5 39.5 43.4 47.4 51.3  55.3  59.2  75.6  82.4
+    me20.6   19.7  15.8  11.8  7.9  3.9  0    3.9  7.9  11.8 15.8  19.7 23.7 27.6 31.6 35.5 39.5 43.4 47.4  51.3  55.3  75.2  80.9
+    me20.7   23.7  19.7  15.8  11.8 7.9  3.9  0    3.9  7.9  11.8  15.8 19.7 23.7 27.6 31.6 35.5 39.5 43.4  47.4  51.3  75.0  79.5
+    me20.8   27.6  23.7  19.7  15.8 11.8 7.9  3.9  0    3.9  7.9   11.8 15.8 19.7 23.7 27.6 31.6 35.5 39.5  43.4  47.4  75.0  78.3
+    me20.9   31.6  27.6  23.7  19.7 15.8 11.8 7.9  3.9  0    3.9   7.9  11.8 15.8 19.7 23.7 27.6 31.6 35.5  39.5  43.4  75.3  77.2
+    me20.10  35.5  31.6  27.6  23.7 19.7 15.8 11.8 7.9  3.9  0     3.9  7.9  11.8 15.8 19.7 23.7 27.6 31.6  35.5  39.5  75.7  76.4
+    me20.11  39.5  35.5  31.6  27.6 23.7 19.7 15.8 11.8 7.9  3.9   0    3.9  7.9  11.8 15.8 19.7 23.7 27.6  31.6  35.5  76.4  75.7
+    me20.12  43.4  39.5  35.5  31.6 27.6 23.7 19.7 15.8 11.8 7.9   3.9  0    3.9  7.9  11.8 15.8 19.7 23.7  27.6  31.6  77.2  75.3 
+    me20.13  47.4  43.4  39.5  35.5 31.6 27.6 23.7 19.7 15.8 11.8  7.9  3.9  0    3.9  7.9  11.8 15.8 19.7  23.7  27.6  78.3  75.0 
+    me20.14  51.3  47.4  43.4  39.5 35.6 31.6 27.6 23.7 19.7 15.8  11.8 7.9  3.9  0    3.9  7.9  11.8 15.8  19.7  23.7  79.5  75.0
+    me20.15  55.3  51.3  47.4  43.4 39.5 35.5 31.6 27.6 23.7 19.7  15.8 11.8 7.9  3.9  0    3.9  7.9  11.8  15.8  19.7  80.9  75.2 
+    me20.16  59.2  55.3  51.3  47.4 43.4 39.5 35.5 31.6 27.6 23.7  19.7 15.8 11.8 7.9  3.9  0    3.9  7.9   11.8  15.8  82.4  75.6 
+    me20.17  63.6  59.2  55.3  51.3 47.4 43.4 39.5 35.5 31.6 27.6  23.7 19.7 15.8 11.8 7.9  3.9  0    3.9   7.9   11.8  84.1  76.1 
+    me20.18  67.1  63.2  59.2  55.3 51.3 47.4 43.4 39.5 35.5 31.6  27.6 23.7 19.7 15.8 11.8 7.9  3.9  0     3.9   7.9   86.0  76.9   
+    me20.19  71.0  67.1  63.2  59.2 55.3 51.3 47.4 43.4 39.5 35.5  31.6 27.6 23.7 19.7 15.8 11.8 7.9  3.9   0     3.9   88.0  77.9 
+    me20.20  75.0  71.0  67.1  63.2 59.2 55.3 51.3 47.4 43.4 39.4  35.5 31.6 27.6 23.7 19.7 15.8 11.8 7.9   3.9   0     90.1  79.0
+    me20.21  75.0  75.1  75.4  75.9 76.6 77.6 78.7 79.9 81.4 83.0  84.8 86.7 88.7 90.9 93.2 95.6 98.0 100.6 103.3 106.1 152.1 158.1 
+    me20.22  76.0  75.5  75.1  75.0 75.1 75.3 75.8 76.5 77.4 78.4  79.7 81.1 82.7 84.4 86.3 88.4 90.5 92.8  95.1  97.6  150.5 154.6
+    me20.23  79.0  77.9  76.9  76.1 75.6 75.2 75.0 75.0 75.3 75.7  76.4 77.2 78.3 79.5 80.9 82.4 84.1 86.0  88.0  90.1  150.0 152.1
+    me20.24  83.8  82.2  80.6  79.3 78.1 77.1 76.3 75.6 75.2 75.0  75.0 75.2 75.6 76.3 77.1 78.1 79.3 80.6  82.2  83.8  150.5 150.5
+    me20.25  90.1  88.0  86.0  84.1 82.4 80.9 79.5 78.3 77.2 76.4  75.7 75.3 75.0 75.0 75.2 75.6 76.1 76.9  77.9  79.0  152.1 150.0
+    me20.26  97.6  95.1  92.8  90.5 88.4 86.3 84.4 82.7 81.1 79.7  78.5 77.4 76.5 75.8 75.3 75.1 75.0 75.1  75.5  76.0  154.6 150.5
+    me20.27  106.1 103.3 100.6 98.0 95.6 93.2 90.9 88.7 86.7 84.8  83.0 81.4 79.9 78.6 77.6 76.6 75.9 75.4  75.1  75.0  158.1 152.1                                                                                       
+;  
+$offecho
+$include Data_input
+#======================Step 0： 模型,数据和参数设置导入=====================
+WTN_gpp.solprint = 2;
+Parameters Caseindex '案例索引', Time_start;
+*WUN.optfile = 1;
+*file opt /Gurobi.opt/;
+*putclose opt 'Nonconvex 2';
+#
+loop(case$(ord(case)>=17 and ord(case)<=20),
+#loop(case,
+    Caseindex = ord(case);
+    Time_start = TimeElapsed;
+    display '=======================================================',Caseindex;
+    Ygpp$(ord(case)<17 or ord(case)>20) = 0;#非me算例
+    Ygpp$(ord(case)>=17 and ord(case)<=20) = 1;#me算例
+    Yunitselfrecycled$(ord(case)<17 or ord(case)>20) = 1;
+    Yunitselfrecycled$(ord(case)>=17 and ord(case)<=20) = 0;
+    
+    Ymeyer20$(ord(case)=20) = 1;#meyer20 case limited number of treatment units
+    NlU_meyer20 = 3;
+    
+    # extract domains for current problem(optional)
+    i(i_) = Fi_all(case,i_);
+    j(j_) = sum(c_$PjcU_all(case,j_,c_), 1);
+    l(l_) = sum(c_$PlcinU_all(case,l_,c_), 1); 
+    c(c_) = sum(i_$Pic_all(case,i_,c_), 1);#集合的值只有真假也就是0,1
+    s(s_) = yes$(ord(s_) <= (card(i) + card(l))); #分离器个数等于废水源数量+水处理单元数量
+    m(m_) = yes$(ord(m_) <= (card(j) + card(l))); #混合器个数等于水处理单元数量+废水排放阱数量
+    #s集合元素中按前面的s为sl,后面的是为si
+    sl(s_) = yes$(ord(s_) <= card(l));
+    si(s_) = yes$((ord(s_) > card(l)) and (ord(s_) <= card(s)));
+    #m集合元素中按前面的m为ml,后面的是为mj
+    ml(m_) = yes$(ord(m_) <= card(l));
+    mj(m_) = yes$((ord(m_) > card(l)) and (ord(m_) <= card(m)));
+    #二维子集合是定义，指定拓扑关系
+    lout(l_,s_) =  yes$((ord(l_) = ord(s_)) and (ord(l_) <= card(l)));
+    lin(m_,l_) =   yes$((ord(m_) = ord(l_)) and (ord(l_) <= card(l)));
+    iout(i_, s_) = yes$((ord(i_) + card(sl) = ord(s_)) and (ord(i_) <= card(i)));
+    jin(m_,j_) =   yes$((ord(m_) - card(l) = ord(j_)) and (ord(j_) <= card(j)));
+    #自循环过程流股集合
+    ssm(s_,m_) = yes$(sl(s_) and ml(m_) and (ord(s_)=ord(m_)));
+    #允许连接的流股集合
+    asm(s_,m_)$((1-Yunitselfrecycled)) = yes$(s(s_) and m(m_) and (not ssm(s_,m_))); 
+    asm(s_,m_)$(Yunitselfrecycled) = yes$(s(s_) and m(m_)); 
+ 
+    # extract data
+    Kloopt = 3;
+    Fi(i) = Fi_all(case,i);            
+    Pic(i,c) = Pic_all(case,i,c)*1E-3;#单位换算为10^3 ppm
+    Rlc(l,c) = Rlc_all(case,l,c);
+    # ----------------!!!!!!!!!---------------
+    PlcinU(l,c) = min(PlcinU_all(case,l,c)*1E-3, smax(i, Pic(i,c)));#单位换算为10^3 ppm  #这个要同时考虑输入和拓扑 
+    PjcU(j,c) = PjcU_all(case,j,c)*1E-3;#单位换算为10^3 ppm
+    OCl(l)$Ygpp = OCl_all(case,l);
+    ICl(l)$Ygpp = ICl_all(case,l);
+    D_pipe(s,m)$(asm(s,m) and Ygpp) = D_pipe_all(case,s,m); 
+    FjU(j)$Ygpp = FjU_all(case,j);
+    #display i, j, l, c, s, si, sl, m, ml, mj, lin, lout, iout, jin;
+    #display Fi, Pic,  Rlc, PlcinU, PjcU, FjU;
+    #============ hard bound============
+    if(Ygpp, #池问题可能包括多个环境阱，有容量限制
+        fsm.Up(si,mj)$asm(si,mj) = min(sum(i$iout(i,si), Fi(i)), smin((j,i,c)$(iout(i,si) and (Pic(i,c) > 0) and jin(mj,j)), sum(ia, Fi(ia))*PjcU(j,c)/Pic(i,c)), sum(j$jin(mj,j), FjU(j)));  #fij_UP
+        fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj)) = min(sum(i, Fi(i)), sum(j$jin(mj,j), FjU(j))); #flj_UP ,       
+    else
+        fsm.Up(si,mj)$asm(si,mj) = min(sum(i$iout(i,si), Fi(i)), smin((j,i,c)$(iout(i,si) and (Pic(i,c) > 0) and jin(mj,j)), sum(ia, Fi(ia))*PjcU(j,c)/Pic(i,c)));  #fij_UP
+        fsm.Up(sl,mj)$(asm(sl,mj) and not ssm(sl,mj)) = sum(i, Fi(i)); #flj_UP    
+    );
+    fsm.Up(si,ml)$asm(si,ml) = sum(i$iout(i,si), Fi(i));#fil_UP
+    fsm.Up(sl,ml)$(asm(sl,ml) and not ssm(sl,ml)) = sum(i, Fi(i)); #fll_UP
+    fsm.Up(sl,ml)$(asm(sl,ml) and ssm(sl,ml)) = sum(i, Fi(i))*Kloopt;##fll'_UP_recycle
+    fl.Up(l)$(Yunitselfrecycled) = Kloopt*sum(i, Fi(i));#考虑循环的水处理单元的上界
+    fl.Up(l)$(1-Yunitselfrecycled) = sum(i, Fi(i));#不考虑循环的水处理单元的上界
+    plcout.Up(l,c) = (1-Rlc(l,c))*PlcinU(l,c);#水处理单元出口浓度上界，跟最大进口浓度上界直接相关
+    #display fsm.Up, PlcinU, plcout.Up;
+    #display fl.Up;
+  
+    Solve WTN_gpp using MIQCP minimizing objval;
+    if((WTN_gpp.modelstat = 1 or WTN_gpp.modelstat = 2 or WTN_gpp.modelstat = 7 or WTN_gpp.modelstat = 8),#更新最优解
+        Fsm_USol(s,m) = fsm.L(s,m);   
+        Fl_USol(l) = fl.L(l);
+        Plcout_USol(l,c)$(Fl_USol(l)>0) = plcout.L(l,c)*1E+3; #注意有的f变量优化结果为0,浓度值没意义可以按0算     
+        Plcin_USol(l,c)$(Fl_USol(l)>0) = Plcout_USol(l,c)/(1- Rlc(l,c)); #注意有的f变量优化结果为0,浓度值没意义可以按0算
+        Pjc_USol(j,c) = (sum((i,si,mj)$(iout(i,si) and jin(mj,j)), fsm.L(si,mj)*Pic(i,c)) +
+                         sum((l,sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj)*plcout.L(l,c)))/sum((s,mj)$jin(mj,j), fsm.L(s,mj))*1E+3; 
+        Fil_USol(i,l) = sum((si,ml)$(iout(i,si) and lin(ml,l)), fsm.L(si,ml));
+        Fij_USol(i,j) = sum((si,mj)$(iout(i,si) and jin(mj,j)), fsm.L(si,mj)); 
+        Fll_USol(l,la)= sum((sl,ml)$(lout(l,sl) and lin(ml,la)), fsm.L(sl,ml));
+        Flj_USol(l,j) = sum((sl,mj)$(lout(l,sl) and jin(mj,j)), fsm.L(sl,mj));
+    );
+
+
+**============Result Report===========
+    Report(case,'UB') = WTN_gpp.objval;
+    Report(case,'LB') = WTN_gpp.objest;
+    Report(case,'Rel_gap') = (WTN_gpp.objval-WTN_gpp.objest)/WTN_gpp.objest;
+    Report(case,'Total time') = TimeElapsed-Time_start;
+    Report(case,'NumEqu')$(1-Ygpp) = WTN.numEqu;
+    Report(case,'NumVar')$(1-Ygpp) = WTN.numVar;
+    Report(case,'NumDVar')$(1-Ygpp) = WTN.numDVar;
+    Report(case,'NumEqu')$(Ygpp) = WTN_gpp.numEqu;
+    Report(case,'NumVar')$(Ygpp) = WTN_gpp.numVar;
+    Report(case,'NumDVar')$(Ygpp) = WTN_gpp.numDVar;
+    Report(case,'NumBL') = card(l)*card(c)*(card(l)+card(j)-1+Yunitselfrecycled);
+    Report(case,'NumL') = card(l);
+    Report(case,'NumI') = card(i);
+    Report(case,'NumL') = card(l);
+    Report(case,'NumJ') = card(j);
+    Report(case,'NumC') = card(c);#可以补充个节水率指标=优化后的新鲜水用量/总设备用水量
+    #清理变量当前值和边界设定 避免影响下个算例的计算
+    option
+        clear = fsm
+        clear = plcout
+        clear = yl
+        clear = ysm
+        clear = Fsm_USol
+        clear = Fl_USol 
+        clear = Plcout_USol  
+        clear = Plcin_USol
+        clear = Pjc_USol
+        clear = Fil_USol
+        clear = Fll_USol
+        clear = Flj_USol
+    ;
+    display '                                                                 ';
+);
+display Report;
+
+
+
+##--------Export data to Excel using Connect---------
+embeddedCode Connect:
+- GAMSReader:
+    symbols:
+      - name: Report   
+- PandasExcelWriter:
+    file: 20240621_WTN_meyer_Baron_thread1.xlsx
+    symbols:
+      - name: Report
+        range: Report!A1
+endEmbeddedCode
+
